@@ -245,3 +245,16 @@ rl_sar/src/rl_sar/src/rl_real_<ROBOT>.cpp  # 可以按需自定义forward()函�
 - [ccrpRepo/RoboMimic_Deploy](https://github.com/ccrpRepo/RoboMimic_Deploy)
 - [Deeprobotics/Lite3_Motion_SDK](https://github.com/DeepRoboticsLab/Lite3_MotionSDK)
 - [chengyangkj/ROS_Flutter_Gui_App](https://github.com/chengyangkj/ROS_Flutter_Gui_App)
+
+---
+
+## 依赖：本仓库**未包含**的内容
+
+为控制仓库体积，以下内容没有纳入版本管理。克隆后如需完整复现，按下表补齐：
+
+| 内容 | 为何排除 | 如何补齐 |
+|---|---|---|
+| `cmake_build/` | 编译产物，可重建 | 在仓库根目录执行 `./build.sh` |
+| `logs/` | 机器人运行日志 | —（运行时自动生成） |
+| `library/inference_runtime/`<br>`src/rl_sar/library/inference_runtime/` | 预编译推理运行时，体积大 | `bash scripts/download_inference_runtime.sh` |
+| `src/rl_sar/library/thirdparty/robot_sdk/unitree/` | 上游公开仓库 [unitreerobotics/unitree_sdk2](https://github.com/unitreerobotics/unitree_sdk2)，本机型（JXG 轮足狗，USB-CAN）用不到 | `cd src/rl_sar/library/thirdparty/robot_sdk && git clone https://github.com/unitreerobotics/unitree_sdk2.git unitree/unitree_sdk2` |
