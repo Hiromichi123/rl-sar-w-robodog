@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#111827" />
+    <title>网页机器人仿真</title>
+    <script>
+      // 桌面版页面:移动设备或窄屏(≤768px)自动跳转移动版 mobile.html
+      // 跳转条件:UA 含移动标识 ∨ 多点触屏+粗指针 ∨ 窗口宽度 ≤ 768px
+      // URL 加 ?force 可强制停留(用于桌面调试移动版布局)
+      (function () {
+        if (/[?&]force\b/.test(location.search)) return;
+        var touch  = navigator.maxTouchPoints > 1 && matchMedia('(pointer: coarse)').matches;
+        var narrow = window.innerWidth <= 768;
+        var mobile = /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent) || touch || narrow;
+        if (mobile) location.replace('./mobile.html');
+      })();
+    </script>
+    <link rel="stylesheet" href="./css/style.css?v=1030" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "./vendor/three/three.module.js?v=0.176.0",
+          "three/addons/controls/OrbitControls.js": "./vendor/three/addons/controls/OrbitControls.js?v=0.176.0",
+          "three/addons/renderers/CSS2DRenderer.js": "./vendor/three/addons/renderers/CSS2DRenderer.js?v=0.176.0",
+          "three/addons/loaders/OBJLoader.js": "./vendor/three/addons/loaders/OBJLoader.js?v=0.176.0",
+          "three/addons/loaders/STLLoader.js": "./vendor/three/addons/loaders/STLLoader.js?v=0.176.0",
+          "three/addons/": "./vendor/three/addons/",
+          "ml-matrix": "./vendor/ml-matrix.js?v=1"
+        }
+      }
+    </script>
+  </head>
+  <body class="sim-off">
+    <main id="app">
+      <section class="viewport" aria-label="网页机器人仿真视图">
+        <canvas id="scene"></canvas>
+        <div id="loading-overlay" class="loading-overlay">
+          <div class="loading-spinner"></div>
+          <div class="loading-text" id="loading-text">加载中...</div>
+        </div>
+        <!-- 仿真关闭态占位层:默认显示(body.sim-off 控制),JS 启动后按持久化开关校正 -->
+        <div id="sim-disabled-overlay" class="sim-disabled-overlay">
+          <div class="sim-disabled-card">
+            <div class="sim-disabled-icon">🧊</div>
+            <div class="sim-disabled-title">3D 仿真未启动</div>
+            <div class="sim-disabled-desc">模型网格(约 40MB)不会加载。ROS 连接、数据看板、实时曲线、录制与真机遥控均可正常使用。</div>
+            <button id="sim-enable-btn" class="ros-btn sim-enable-btn" type="button">▶ 启动 3D 仿真</button>
+          </div>
+        </div>
+        <div class="topbar">
+          <div class="brand">网页机器人仿真</div>
+          <div id="load-status" class="load-status">读取机器人模型...</div>
+          <span id="ros-status" class="ros-status ros-offline" title="ROS 连接状态">未连接</span>
+        </div>
+        <div class="scene-tools" aria-label="视图控制">
+          <div class="ros-url-dd">
+            <input id="ros-url-input" class="ros-url-input" type="url" spellcheck="false" autocomplete="off"
+              placeholder="ws://host:port" aria-label="ROS 地址" />
+            <div id="ros-url-dd-panel" class="ros-dd-panel" hidden><!-- ROS 地址历史下拉面板 --></div>
+          </div>
+          <button id="ros-connect-btn" class="ros-btn ros-btn-wide" type="button">连接 ROS</button>
+          <button id="sim-toggle-btn" class="ros-btn sim-toggle-btn" type="button" title="启动/关闭 3D 仿真画布">🧊 仿真:关</button>
+          <label class="ros-pos-source" title="ROS 在线时选择写入仿真关节的位置字段">
+            <select id="ros-pos-source" disabled>
+              <option value="real">使用 real_pos</option>
+              <option value="target">使用 target_pos</option>
+            </select>
+          </label>
+          <div class="view-buttons">
+            <button id="recorder-start-btn" class="ros-btn recorder-start" type="button" disabled>● 开始录制</button>
+            <button id="view-home" title="恢复默认视角">视图复位</button>
+            <button id="view-front" title="切换正视视角">正视</button>
+            <button id="view-side" title="切换侧视视角">侧视</button>
+            <button id="view-bottom" title="切换底部视角">底视</button>
+          </div>
+          <div class="scene-options">
+            <label class="annotation-toggle"><input id="annotations-toggle" type="checkbox"><span>注释</span></label>
+            <label class="annotation-toggle"><input id="com-toggle" type="checkbox"><span>重心</span></label>
+            <button id="notify-btn" class="notify-btn" type="button" title="机器人通知">🔔<span id="notify-badge" class="notify-badge"></span></button>
+          </div>
+        </div>
+        <div id="notify-panel" class="notify-panel" hidden>
+          <div class="notify-panel-header">
+            <span>通知历史</span>
+            <button id="notify-clear" type="button" class="notify-clear-btn">清空</button>
+          </div>
+          <div id="notify-history-list" class="notify-history-list"></div>
+        </div>
+        <div class="hint">拖拽旋转视角 · 滚轮缩放 · 右键平移</div>
+        <button class="panel-toggle" id="panel-toggle" aria-label="切换控制面板">⚙</button>
+        <div class="panel-backdrop" id="panel-backdrop"></div>
+      </section>
+      <aside class="control-panel" id="control-panel">
+        <div class="control-tabs" role="tablist" aria-label="控制方式">
+          <button id="rosdebug-tab" class="active" role="tab" aria-selected="true" aria-controls="rosdebug-control-view" data-control-tab="rosdebug">话题调试</button>
+          <button id="alarm-tab" role="tab" aria-selected="false" aria-controls="alarm-control-view" data-control-tab="alarm">报警配置</button>
+          <button id="config-tab" role="tab" aria-selected="false" aria-controls="config-control-view" data-control-tab="config">录制列表</button>
+          <button id="movement-tab" role="tab" aria-selected="false" aria-controls="movement-control-view" data-control-tab="movement">移动控制</button>
+          <button id="joint-tab" role="tab" aria-selected="false" aria-controls="joint-control-view" data-control-tab="joint">关节控制</button>
+          <button id="cartesian-tab" role="tab" aria-selected="false" aria-controls="cartesian-control-view" data-control-tab="cartesian">笛卡尔控制</button>
+          <button id="curves-tab" role="tab" aria-selected="false" aria-controls="curves-control-view" data-control-tab="curves">可视化</button>
+          <button id="dashboard-tab" role="tab" aria-selected="false" aria-controls="dashboard-control-view" data-control-tab="dashboard">数据看板</button>
+          <button id="camera-tab" role="tab" aria-selected="false" aria-controls="camera-control-view" data-control-tab="camera">相机</button>
+          <button id="lidar-tab" role="tab" aria-selected="false" aria-controls="lidar-control-view" data-control-tab="lidar">雷达</button>
+          <button id="zero-tab" role="tab" aria-selected="false" aria-controls="zero-control-view" data-control-tab="zero">置零</button>
+        </div>
+        <!-- 数据录制与复现页面:录制记录列表 -->
+        <div id="config-control-view" class="control-view" role="tabpanel" aria-labelledby="config-tab" hidden>
+          <!-- 录制 & 复现(IndexedDB 存储) -->
+          <section class="cartesian-section config-section" aria-label="录制记录与复现列表">
+            <div class="section-heading">
+              <h2>录制记录</h2>
+              <p class="config-hint">录制按钮已在页签上方。下方列表展示已保存到 IndexedDB 的所有录制,可点击复现/删除。复现时会自动切换到录制时的机器人模型。录制不依赖网络,断网后也可本地回放。</p>
+            </div>
+            <div class="recorder-control">
+              <button id="replay-stop-btn" class="ros-btn replay-stop" type="button" disabled>■ 停止复现</button>
+              <button id="recordings-clear-btn" class="ros-btn recordings-clear" type="button" title="清空所有录制记录">清空全部</button>
+            </div>
+            <!-- 复现拖动条 host:平时隐藏,在复现某条记录时其内容被移动到对应行的 .rec-seek-slot -->
+            <div id="replay-seek-host" hidden aria-hidden="true">
+              <div class="replay-seek-wrap" aria-label="复现进度">
+                <span id="replay-cur-time" class="replay-time replay-time-cur">00:00</span>
+                <input id="replay-seek" type="range" class="replay-seek" min="0" max="0" step="10" value="0" disabled aria-label="拖动复现进度" />
+                <span id="replay-total-time" class="replay-time replay-time-total">00:00</span>
+              </div>
+            </div>
+            <div class="recordings-list-wrap">
+              <div class="recordings-list-header">
+                <span class="rec-name-col">记录</span>
+                <span class="rec-model-col">模型</span>
+                <span class="rec-meta-col">时间</span>
+                <span class="rec-frames-col">帧数</span>
+                <span class="rec-actions-col">操作</span>
+              </div>
+              <ul id="recordings-list" class="recordings-list">
+                <li class="rec-empty">尚无录制记录 — 连接 ROS 后点击「开始录制」即可</li>
+              </ul>
+            </div>
+          </section>
+        </div>
+        <!-- 参数报警配置页:阈值规则 + 当前报警列表(规则持久化到 localStorage) -->
+        <div id="alarm-control-view" class="control-view" role="tabpanel" aria-labelledby="alarm-tab" hidden>
+          <section class="cartesian-section" aria-label="参数报警配置">
+            <div class="section-heading">
+              <h2>报警规则</h2>
+              <label class="toggle-label"><input id="alarm-enabled" type="checkbox" checked><span>启用报警</span></label>
+            </div>
+            <p class="config-hint">为电机/IMU 参数配置上下阈值(留空表示不启用该侧),「周期」为越限需持续的帧数(默认 1 = 立即报警)。越限时 3D 模型对应关节会挂红色 ⚠ 标记,并列入下方「当前报警」。规则自动保存到浏览器本地。</p>
+            <div id="alarm-rules-list" class="alarm-rules-list"></div>
+            <button id="alarm-add-rule" class="ros-btn alarm-add" type="button">+ 添加规则</button>
+            <div class="section-heading alarm-active-heading">
+              <h2>当前报警</h2>
+              <span id="alarm-summary" class="alarm-summary">0 条报警</span>
+            </div>
+            <ul id="alarm-active-list" class="alarm-active-list">
+              <li class="alarm-empty">暂无报警</li>
+            </ul>
+          </section>
+        </div>
+        <div id="joint-control-view" class="control-view" hidden>
+          <div id="controls" class="controls" aria-live="polite"></div>
+        </div>
+        <div id="cartesian-control-view" class="control-view" role="tabpanel" aria-labelledby="cartesian-tab" hidden>
+          <!-- 四足机器人控制区（模型 2） -->
+          <div id="quadruped-cartesian" hidden>
+            <section class="cartesian-section">
+              <div class="section-heading"><h2>姿态预设</h2></div>
+              <div class="presets" aria-label="姿态预设">
+                <button data-preset="home">归零</button>
+                <button id="posture-stand">站立</button>
+                <button id="quad-base-reset">底盘复位</button>
+              </div>
+            </section>
+            <section class="cartesian-section">
+              <div class="section-heading"><h2>机身位姿</h2><output id="body-pose-readout">X 0.00 · Y 0.00 · Z 0.15</output></div>
+              <div class="cartesian-stepper" data-body-axis="x"><span>X 位移 / m</span><button type="button" class="stepper-button">←</button><output>0.000</output><button type="button" class="stepper-button">→</button></div>
+              <div class="cartesian-stepper" data-body-axis="y"><span>Y 位移 / m</span><button type="button" class="stepper-button">←</button><output>0.000</output><button type="button" class="stepper-button">→</button></div>
+              <div class="cartesian-stepper" data-body-axis="z"><span>Z 高度 / m</span><button type="button" class="stepper-button">↓</button><output>0.150</output><button type="button" class="stepper-button">↑</button></div>
+              <div class="cartesian-stepper" data-body-axis="roll"><span>Roll / rad</span><button type="button" class="stepper-button">↻</button><output>0.00</output><button type="button" class="stepper-button">↺</button></div>
+              <div class="cartesian-stepper" data-body-axis="pitch"><span>Pitch / rad</span><button type="button" class="stepper-button">↻</button><output>0.00</output><button type="button" class="stepper-button">↺</button></div>
+              <div class="cartesian-stepper" data-body-axis="yaw"><span>Yaw / rad</span><button type="button" class="stepper-button">↻</button><output>0.00</output><button type="button" class="stepper-button">↺</button></div>
+              <button type="button" class="wide-command" id="body-reset">机身复位</button>
+            </section>
+
+            <section class="cartesian-section">
+              <div class="section-heading"><h2>单腿末端 (IK)</h2><label class="toggle-label"><input id="ik-orientation-quad" type="checkbox"><span>姿态约束</span></label></div>
+              <div class="arm-tabs" role="tablist" aria-label="腿部选择">
+                <button class="active" data-leg-tab="FL" role="tab" aria-selected="true">左前腿</button>
+                <button data-leg-tab="FR" role="tab" aria-selected="false">右前腿</button>
+                <button data-leg-tab="RL" role="tab" aria-selected="false">左后腿</button>
+                <button data-leg-tab="RR" role="tab" aria-selected="false">右后腿</button>
+              </div>
+              <div id="cartesian-legs">
+                <div class="leg-control-page" data-leg="FL">
+                  <div class="cartesian-stepper" data-axis="x"><span>X / m</span><button type="button" class="stepper-button">←</button><output>0.000</output><button type="button" class="stepper-button">→</button></div>
+                  <div class="cartesian-stepper" data-axis="y"><span>Y / m</span><button type="button" class="stepper-button">←</button><output>0.000</output><button type="button" class="stepper-button">→</button></div>
+                  <div class="cartesian-stepper" data-axis="z"><span>Z / m</span><button type="button" class="stepper-button">↓</button><output>0.000</output><button type="button" class="stepper-button">↑</button></div>
+                  <button type="button" class="wide-command leg-reset">左前腿复位</button>
+                  <div class="ik-status"><span>机身坐标系</span><strong class="ik-msg">当前足端位姿</strong></div>
+                </div>
+                <div class="leg-control-page" data-leg="FR" hidden>
+                  <div class="cartesian-stepper" data-axis="x"><span>X / m</span><button type="button" class="stepper-button">←</button><output>0.000</output><button type="button" class="stepper-button">→</button></div>
+                  <div class="cartesian-stepper" data-axis="y"><span>Y / m</span><button type="button" class="stepper-button">←</button><output>0.000</output><button type="button" class="stepper-button">→</button></div>
+                  <div class="cartesian-stepper" data-axis="z"><span>Z / m</span><button type="button" class="stepper-button">↓</button><output>0.000</output><button type="button" class="stepper-button">↑</button></div>
+                  <button type="button" class="wide-command leg-reset">右前腿复位</button>
+                  <div class="ik-status"><span>机身坐标系</span><strong class="ik-msg">当前足端位姿</strong></div>
+                </div>
+                <div class="leg-control-page" data-leg="RL" hidden>
+                  <div class="cartesian-stepper" data-axis="x"><span>X / m</span><button type="button" class="stepper-button">←</button><output>0.000</output><button type="button" class="stepper-button">→</button></div>
+                  <div class="cartesian-stepper" data-axis="y"><span>Y / m</span><button type="button" class="stepper-button">←</button><output>0.000</output><button type="button" class="stepper-button">→</button></div>
+                  <div class="cartesian-stepper" data-axis="z"><span>Z / m</span><button type="button" class="stepper-button">↓</button><output>0.000</output><button type="button" class="stepper-button">↑</button></div>
+                  <button type="button" class="wide-command leg-reset">左后腿复位</button>
+                  <div class="ik-status"><span>机身坐标系</span><strong class="ik-msg">当前足端位姿</strong></div>
+                </div>
+                <div class="leg-control-page" data-leg="RR" hidden>
+                  <div class="cartesian-stepper" data-axis="x"><span>X / m</span><button type="button" class="stepper-button">←</button><output>0.000</output><button type="button" class="stepper-button">→</button></div>
+                  <div class="cartesian-stepper" data-axis="y"><span>Y / m</span><button type="button" class="stepper-button">←</button><output>0.000</output><button type="button" class="stepper-button">→</button></div>
+                  <div class="cartesian-stepper" data-axis="z"><span>Z / m</span><button type="button" class="stepper-button">↓</button><output>0.000</output><button type="button" class="stepper-button">↑</button></div>
+                  <button type="button" class="wide-command leg-reset">右后腿复位</button>
+                  <div class="ik-status"><span>机身坐标系</span><strong class="ik-msg">当前足端位姿</strong></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+        <div id="curves-control-view" class="control-view" role="tabpanel" aria-labelledby="curves-tab" hidden>
+          <!-- ① IMU 数据面板 -->
+          <section class="cartesian-section imu-section" aria-label="IMU 数据">
+            <div class="section-heading imu-heading">
+              <h2>IMU 数据</h2>
+              <div class="imu-tools" aria-label="IMU 显示工具">
+                <output id="imu-status" class="imu-status" title="IMU 数据流状态">未连接</output>
+              </div>
+            </div>
+            <!-- 15 条 IMU 关键量 sparkline 曲线 -->
+            <div class="imu-curves">
+              <div class="curves-legend imu-legend">
+                <span class="legend-dot legend-imu-rpy">   </span> Roll/Pitch/Yaw
+                <span class="legend-dot legend-imu-acc">   </span> Accel
+                <span class="legend-dot legend-imu-gyro">  </span> Gyro
+                <span class="legend-dot legend-imu-pos">   </span> NED Position
+                <span class="legend-dot legend-imu-vel">   </span> Body Velocity
+              </div>
+              <div id="imu-curves-list" class="curves-list imu-curves-list"><!-- IMU 曲线行由 curves.js 动态生成 --></div>
+            </div>
+          </section>
+
+          <!-- ② 摇杆输出 -->
+          <section class="cartesian-section joy-section" aria-label="摇杆输出">
+            <div class="section-heading joy-heading">
+              <h2>摇杆输出</h2>
+              <div class="joy-tools" aria-label="摇杆曲线状态">
+                <output id="joy-status" class="joy-status" title="摇杆操作状态">待操作</output>
+              </div>
+            </div>
+            <div class="joy-curves">
+              <div id="joystick-curves-list" class="curves-list joystick-curves-list"><!-- 摇杆曲线行由 curves.js 动态生成 --></div>
+            </div>
+          </section>
+
+          <!-- ③ 电机数据 -->
+          <section class="cartesian-section">
+            <div class="section-heading">
+              <h2>电机数据</h2>
+              <div class="curves-tools" aria-label="曲线工具栏">
+                <label class="curves-tool-label">
+                  <select id="curves-window" title="显示时间窗口">
+                    <option value="5">5 秒</option>
+                    <option value="10" selected>10 秒</option>
+                    <option value="30">30 秒</option>
+                    <option value="60">60 秒</option>
+                  </select>
+                </label>
+                <label class="curves-tool-checkbox" title="暂停记录">
+                  <input id="curves-pause" type="checkbox"><span>暂停</span>
+                </label>
+                <button id="curves-clear" type="button" class="curves-tool-btn">清除</button>
+                <span class="curves-hint">滚轮缩放 · 双击复位</span>
+              </div>
+              <div id="curves-seekbar" class="curves-seekbar" title="拖拽浏览历史数据">
+                <div class="seekbar-track"></div>
+                <div class="seekbar-thumb"></div>
+                <span class="seekbar-label">实时</span>
+              </div>
+            </div>
+            <div class="curves-legend">
+              <span class="legend-dot legend-real"></span> 实际值 real
+              <span class="legend-dot legend-target"></span> 指令值 target
+            </div>
+            <div id="curves-list" class="curves-list"><!-- 每条关节行由 curves.js 动态生成 --></div>
+          </section>
+        </div>
+        <div id="movement-control-view" class="control-view" role="tabpanel" aria-labelledby="movement-tab" hidden>
+          <div class="twist-readout" aria-label="最近一次 cmd_vel">
+            <span class="twist-title">Twist /rl_real/cmd_vel</span>
+            <span class="twist-vals">
+              <span class="twist-v"><span>x</span><output id="twist-lin-x">0.00</output>m/s</span>
+              <span class="twist-v"><span>y</span><output id="twist-lin-y">0.00</output>m/s</span>
+              <span class="twist-v"><span>z</span><output id="twist-lin-z">0.00</output>m/s</span>
+              <span class="twist-v"><span>ω</span><output id="twist-ang-z">0.00</output>rad/s</span>
+            </span>
+            <span id="twist-count" class="twist-count">0 帧</span>
+          </div>
+          <section class="ros-movement-section">
+            <div class="section-heading">
+              <span>真机 ROS 命令</span>
+              <span id="ros-cmd-status" class="ros-status-pill ros-offline" title="ROS 未连接时按钮无效">ROS 离线</span>
+            </div>
+            <div class="behavior-pills" aria-label="行为命令">
+              <button type="button" class="behavior-pill is-stand" data-behavior="getup">站立 · getup</button>
+              <button type="button" class="behavior-pill is-crouch" data-behavior="getdown">趴下 · getdown</button>
+              <button type="button" class="behavior-pill is-passive" data-behavior="passive">被动 · passive</button>
+              <button type="button" class="behavior-pill is-loco" data-behavior="locomotion">进入 RL · locomotion</button>
+              <button type="button" class="behavior-pill" data-behavior="vel_stop">速度清零 · vel_stop</button>
+              <button type="button" class="behavior-pill" data-behavior="zero">电机置零 · zero</button>
+              <button type="button" class="behavior-pill is-check" id="check-stand-btn" title="检查电机零位和 IMU 状态(不触发站立)">检查站立</button>
+              <div id="briefing-scenes" class="briefing-scenes" title="点选多个场景(按点选顺序连播),再点一次取消">
+                <button type="button" class="scene-chip" data-scene="elevator"><span class="chip-order"></span>电梯</button>
+                <button type="button" class="scene-chip" data-scene="forklift"><span class="chip-order"></span>叉车</button>
+                <button type="button" class="scene-chip" data-scene="lifting"><span class="chip-order"></span>吊装</button>
+                <button type="button" class="scene-chip" data-scene="warehouse"><span class="chip-order"></span>仓库</button>
+                <button type="button" class="scene-chip" data-scene="height"><span class="chip-order"></span>高处</button>
+              </div>
+              <button type="button" class="behavior-pill is-brief" id="briefing-play-btn" title="语音播报所选作业交底场景(/rl_briefing/play)">▶ 作业交底</button>
+              <button type="button" class="behavior-pill is-stopbrief" id="briefing-stop-btn" title="打断当前语音播报">■ 停止播报</button>
+            </div>
+          </section>
+          <div id="movement-quadruped-chassis" hidden>
+            <section class="cartesian-section chassis-section">
+              <div class="joy-speed-bars" role="group" aria-label="摇杆速度上限">
+                <div class="joy-gear-bar">
+                  <span class="joy-gear-label">线速度</span>
+                  <div class="joy-gear-track-wrap">
+                    <input type="range" class="joy-gear-slider joy-lin-slider" min="0" max="1.5" step="0.05" value="0.5" title="摇杆满偏线速度上限,0~1.5 m/s 连续可调" aria-label="线速度上限,0 到 1.5 m/s" />
+                  </div>
+                  <output class="joy-gear-val joy-lin-val">0.50</output>
+                  <span class="joy-gear-unit">m/s</span>
+                </div>
+                <div class="joy-gear-bar">
+                  <span class="joy-gear-label">角速度</span>
+                  <div class="joy-gear-track-wrap">
+                    <input type="range" class="joy-gear-slider joy-ang-slider" min="0" max="1.5" step="0.05" value="0.5" title="摇杆满偏角速度上限,0~1.5 rad/s 连续可调" aria-label="角速度上限,0 到 1.5 rad/s" />
+                  </div>
+                  <output class="joy-gear-val joy-ang-val">0.50</output>
+                  <span class="joy-gear-unit">rad/s</span>
+                </div>
+              </div>
+              <div class="joystick-dual">
+                <div class="joy-col">
+                  <span class="joy-col-label">移动 X/Y</span>
+                  <div class="joystick" id="quad-chassis-joystick" aria-label="移动摇杆" title="上=前进 下=后退 左右=横移,松开停止">
+                    <div class="joystick-knob"></div>
+                  </div>
+                </div>
+                <div class="joy-col">
+                  <span class="joy-col-label">高度 Z / 旋转 ω</span>
+                  <div class="joystick" id="quad-chassis-joystick-z" aria-label="高度旋转摇杆" title="上=升高 下=降低 左右=旋转,松开回中">
+                    <div class="joystick-knob"></div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+        <!-- 数据看板:电机 + IMU 数字一览(单页) -->
+        <div id="dashboard-control-view" class="control-view" role="tabpanel" aria-labelledby="dashboard-tab" hidden>
+          <!-- ① 电机数据:全部受控关节的 实际/目标/偏差/速度 -->
+          <section class="dashboard-section">
+            <div class="section-heading">
+              <h2>电机数据</h2>
+            </div>
+            <div class="dashboard-motor-head" aria-hidden="true">
+              <span>序号</span><span>关节</span><span title="真机 CAN 总线 ID：髋关节=4、大腿=3、小腿=2、足端轮=1，悬停各行可查看 MasterID">CAN ID</span><span>目标位置</span><span>实际位置</span><span>目标速度</span><span>实际速度</span><span>目标力矩</span><span>实际力矩</span><span title="位置比例增益（刚度）：跟踪目标位置的“弹簧硬度”，越大关节越硬">kp 刚度</span><span title="速度微分增益（阻尼）：抑制振动，越大运动越平稳、响应变钝">kd 阻尼</span><span title="电机温度（°C）">温度 °C</span>
+            </div>
+            <div id="dashboard-motor-grid" class="dashboard-motor-grid"></div>
+          </section>
+          <!-- ② IMU 数据:姿态/四元数/加速度/角速度/位置/速度 共 19 项 -->
+          <section class="dashboard-section">
+            <div class="section-heading">
+              <h2>IMU 数据</h2>
+            </div>
+            <div id="dashboard-imu-grid" class="dashboard-imu-grid"></div>
+          </section>
+        </div>
+        <!-- 相机(Insight 9):彩色/红外画面 + 相机 IMU + VIO 位姿/状态 -->
+        <div id="camera-control-view" class="control-view" role="tabpanel" aria-labelledby="camera-tab" hidden>
+          <section class="camera-section">
+            <div class="camera-toolbar">
+              <div class="cam-channels" role="tablist" aria-label="相机画面通道">
+                <button type="button" class="cam-ch is-active" data-cam-channel="color">彩色 · color</button>
+                <button type="button" class="cam-ch" data-cam-channel="infra1">左红外 · infra1</button>
+                <button type="button" class="cam-ch" data-cam-channel="infra2">右红外 · infra2</button>
+              </div>
+              <span id="cam-stream-state" class="cam-state">ROS 未连接</span>
+            </div>
+            <div class="cam-stage">
+              <img id="cam-color-img" class="cam-layer" alt="相机彩色画面(compressed JPEG)" hidden />
+              <canvas id="cam-infra1-canvas" class="cam-layer" hidden></canvas>
+              <canvas id="cam-infra2-canvas" class="cam-layer" hidden></canvas>
+              <div id="cam-placeholder" class="cam-placeholder">连接 ROS 并停留在本页签后显示相机画面<br>彩色 / 红外话题使用 best_effort QoS</div>
+              <div id="cam-overlay" class="cam-overlay"></div>
+            </div>
+            <div class="cam-meta-row">
+              <span id="cam-fps" class="cam-meta">— FPS</span>
+              <span id="cam-topic" class="cam-meta cam-meta-topic" title="">等待首帧…</span>
+              <span id="cam-resolution" class="cam-meta">-</span>
+              <span id="cam-encoding" class="cam-meta">-</span>
+              <span id="cam-frames" class="cam-meta">帧 0</span>
+              <span id="cam-bytes" class="cam-meta">-</span>
+            </div>
+          </section>
+          <section class="camera-data">
+            <div class="cam-card">
+              <div class="section-heading"><h2>相机 IMU</h2><span class="cam-card-topic">/camera/camera/imu</span></div>
+              <div class="cam-datagrid">
+                <span class="cam-dim-label">加速度 m/s²</span>
+                <span class="cam-dim">X <b id="cam-acc-x">-</b></span>
+                <span class="cam-dim">Y <b id="cam-acc-y">-</b></span>
+                <span class="cam-dim">Z <b id="cam-acc-z">-</b></span>
+                <span class="cam-dim-label">角速度 rad/s</span>
+                <span class="cam-dim">X <b id="cam-gyr-x">-</b></span>
+                <span class="cam-dim">Y <b id="cam-gyr-y">-</b></span>
+                <span class="cam-dim">Z <b id="cam-gyr-z">-</b></span>
+              </div>
+            </div>
+            <div class="cam-card">
+              <div class="section-heading"><h2>vSLAM 位姿</h2><span class="cam-card-topic">/camera/camera/vio_100hz</span></div>
+              <div class="cam-datagrid">
+                <span class="cam-dim-label">位置 m</span>
+                <span class="cam-dim">X <b id="cam-vio-x">-</b></span>
+                <span class="cam-dim">Y <b id="cam-vio-y">-</b></span>
+                <span class="cam-dim">Z <b id="cam-vio-z">-</b></span>
+              </div>
+              <div class="cam-quat">四元数 <b id="cam-vio-q">-</b></div>
+            </div>
+            <div class="cam-card">
+              <div class="section-heading"><h2>VIO 状态</h2><span class="cam-card-topic">/camera/camera/vio_status</span></div>
+              <pre id="cam-vio-status-text" class="cam-status-pre">-</pre>
+            </div>
+          </section>
+        </div>
+        <!-- Livox MID-360 雷达:3D 点云 + 内置 BMI088 IMU -->
+        <div id="lidar-control-view" class="control-view" role="tabpanel" aria-labelledby="lidar-tab" hidden>
+          <section class="camera-section">
+            <div class="camera-toolbar">
+              <div class="lidar-tools">
+                <button type="button" id="lidar-btn-reset" class="lidar-btn">复位视角</button>
+                <button type="button" id="lidar-btn-top" class="lidar-btn">俯视</button>
+                <button type="button" id="lidar-btn-side" class="lidar-btn">侧视</button>
+                <button type="button" id="lidar-btn-rotate" class="lidar-btn">自动旋转</button>
+                <button type="button" id="lidar-btn-color" class="lidar-btn">着色:高度</button>
+                <button type="button" id="lidar-btn-acc" class="lidar-btn is-active">累加建图</button>
+                <button type="button" id="lidar-btn-clear" class="lidar-btn">清空</button>
+                <label class="lidar-size-ctl">点大小
+                  <input type="range" id="lidar-point-size" min="0.01" max="0.30" step="0.01" value="0.05" />
+                  <span id="lidar-point-size-val">0.05</span>
+                </label>
+              </div>
+              <span id="lidar-stream-state" class="cam-state">ROS 未连接</span>
+            </div>
+            <div class="cam-stage">
+              <canvas id="lidar-3d-canvas" class="lidar-canvas"></canvas>
+              <div id="lidar-placeholder" class="cam-placeholder">连接 ROS 并停留在本页签后显示 3D 点云<br>/livox/lidar · PointCloud2 · best_effort QoS(可拖拽旋转/滚轮缩放)</div>
+            </div>
+            <div class="cam-meta-row">
+              <span id="lidar-fps" class="cam-meta">— FPS</span>
+              <span id="lidar-points" class="cam-meta">0 点</span>
+              <span id="lidar-acc-points" class="cam-meta">累计 0 点</span>
+              <span id="lidar-kbps" class="cam-meta">-</span>
+              <span id="lidar-range" class="cam-meta">-</span>
+              <span id="lidar-step" class="cam-meta">-</span>
+              <span id="lidar-frame" class="cam-meta cam-meta-topic">-</span>
+              <span id="lidar-frame-count" class="cam-meta">帧 0</span>
+            </div>
+          </section>
+          <section class="camera-data">
+            <div class="cam-card">
+              <div class="section-heading"><h2>雷达内置 IMU · BMI088</h2><span class="cam-card-topic">/livox/imu · 200Hz</span></div>
+              <div class="cam-datagrid">
+                <span class="cam-dim-label">加速度 m/s²</span>
+                <span class="cam-dim">X <b id="lidar-acc-x">-</b></span>
+                <span class="cam-dim">Y <b id="lidar-acc-y">-</b></span>
+                <span class="cam-dim">Z <b id="lidar-acc-z">-</b></span>
+                <span class="cam-dim-label">角速度 rad/s</span>
+                <span class="cam-dim">X <b id="lidar-gyr-x">-</b></span>
+                <span class="cam-dim">Y <b id="lidar-gyr-y">-</b></span>
+                <span class="cam-dim">Z <b id="lidar-gyr-z">-</b></span>
+                <span class="cam-dim-label">角速度 °/s</span>
+                <span class="cam-dim">X <b id="lidar-gyr-x-d">-</b></span>
+                <span class="cam-dim">Y <b id="lidar-gyr-y-d">-</b></span>
+                <span class="cam-dim">Z <b id="lidar-gyr-z-d">-</b></span>
+              </div>
+            </div>
+            <div class="cam-card lidar-atti-card">
+              <div class="section-heading"><h2>姿态(重力估计)</h2></div>
+              <canvas id="lidar-atti" class="lidar-atti" width="132" height="132"></canvas>
+            </div>
+            <div class="cam-card">
+              <div class="section-heading"><h2>实时波形</h2><span class="lidar-wave-legend">
+                <i style="background:#ff7a7a"></i>aX <i style="background:#7ee08a"></i>aY <i style="background:#6db6ff"></i>aZ
+                <i style="background:#c96565"></i>ωX <i style="background:#5fae6b"></i>ωY <i style="background:#568bc9"></i>ωZ
+              </span></div>
+              <canvas id="lidar-wave" class="lidar-wave" width="600" height="110"></canvas>
+            </div>
+          </section>
+        </div>
+        <!-- 置零:单电机选择矩阵 + 单电机/全部置零(危险操作,仅趴下/被动态使用) -->
+        <div id="zero-control-view" class="control-view" role="tabpanel" aria-labelledby="zero-tab" hidden>
+          <section class="zero-section">
+            <div class="zero-warning">
+              ⚠ 危险操作:置零会把电机<b>当前位置</b>写为零点!仅当机器狗处于<b>趴下 / 被动状态</b>、且关节已位于期望零位时使用,误操作将导致姿态异常。格内数值为实时位置(rad),<b class="zero-red-hint">红色 = 偏离零位 &gt; 0.1 rad</b>。
+            </div>
+            <div class="zero-grid-header" aria-hidden="true">
+              <span>髋关节</span><span>大腿</span><span>小腿</span><span>足端轮</span>
+            </div>
+            <div id="zero-motor-grid" class="zero-motor-grid" aria-label="电机选择矩阵(4 腿 × 4 关节,可多选)"></div>
+            <div class="zero-footer">
+              <span id="zero-selected-label" class="zero-selected-label">未选择电机</span>
+              <button type="button" id="zero-select-red-btn" class="behavior-pill zero-select-red-btn" data-ui-only title="一键选中所有偏离零位超过 0.1 rad 的电机">全选标红电机</button>
+              <button type="button" id="zero-motor-btn" class="behavior-pill zero-motor-btn" disabled title="对选中的电机逐个执行置零(二次确认)">置零选中电机</button>
+              <button type="button" class="behavior-pill zero-all-btn" data-behavior="zero" title="遍历 16 个电机全部置零">全部置零 · zero</button>
+            </div>
+          </section>
+        </div>
+        <!-- ROS 话题调试:接收区(顶部全宽) + 话题列表/发送区(左右布局) -->
+        <div id="rosdebug-control-view" class="control-view" role="tabpanel" aria-labelledby="rosdebug-tab">
+          <!-- ① 接收区(顶部全宽) -->
+          <section class="cartesian-section">
+            <div class="section-heading">
+              <h2>接收区</h2>
+              <output id="ros-debug-rx-count" class="imu-status" title="累计收到条数">0 条</output>
+            </div>
+            <div class="ros-debug-io-row">
+              <div class="ros-debug-stack">
+                <div class="ros-debug-dd">
+                  <input id="ros-debug-rx-topic" class="ros-url-input" type="text" placeholder="/topic_name" spellcheck="false" autocomplete="off" aria-label="接收话题名">
+                  <button id="ros-debug-rx-topic-clear" type="button" class="ros-dd-clear" title="清空话题名" aria-label="清空话题名">×</button>
+                  <div id="ros-debug-rx-dd" class="ros-debug-dd-panel" hidden></div>
+                </div>
+                <div class="ros-debug-dd">
+                  <input id="ros-debug-rx-type" class="ros-url-input" type="text" placeholder="std_msgs/msg/String" spellcheck="false" autocomplete="off" aria-label="接收消息类型">
+                  <button id="ros-debug-rx-type-clear" type="button" class="ros-dd-clear" title="清空消息类型" aria-label="清空消息类型">×</button>
+                </div>
+              </div>
+              <div class="ros-debug-btn-grid">
+                <button id="ros-debug-topics-refresh" type="button" class="curves-tool-btn" title="重新获取 rosbridge 上的话题列表">刷新</button>
+                <button id="ros-debug-rx-toggle" class="ros-btn" type="button">订阅</button>
+                <label class="curves-tool-checkbox" title="暂停后仍计数,但不显示新消息">
+                  <input id="ros-debug-rx-pause" type="checkbox"><span>暂停</span>
+                </label>
+                <button id="ros-debug-rx-clear" type="button" class="curves-tool-btn">清空</button>
+              </div>
+            </div>
+            <p class="config-hint" id="ros-debug-hint">连接 ROS 后,点击「刷新」获取话题,或在话题输入框下拉中直接选择。</p>
+            <div id="ros-debug-rx-log" class="ros-debug-log" aria-live="polite"></div>
+          </section>
+
+          <!-- ② 发送区(全宽) -->
+          <section class="cartesian-section">
+            <div class="section-heading">
+              <h2>发送区</h2>
+              <output id="ros-debug-tx-status" class="imu-status" title="发送状态">未发布</output>
+            </div>
+            <div class="ros-debug-io-row">
+              <div class="ros-debug-stack">
+                <div class="ros-debug-dd">
+                  <input id="ros-debug-tx-topic" class="ros-url-input" type="text" placeholder="/topic_name" spellcheck="false" autocomplete="off" aria-label="发送话题名">
+                  <button id="ros-debug-tx-topic-clear" type="button" class="ros-dd-clear" title="清空话题名" aria-label="清空话题名">×</button>
+                  <div id="ros-debug-tx-dd" class="ros-debug-dd-panel" hidden></div>
+                </div>
+                <div class="ros-debug-dd">
+                  <input id="ros-debug-tx-type" class="ros-url-input" type="text" placeholder="std_msgs/msg/String" spellcheck="false" autocomplete="off" aria-label="发送消息类型">
+                  <button id="ros-debug-tx-type-clear" type="button" class="ros-dd-clear" title="清空消息类型" aria-label="清空消息类型">×</button>
+                </div>
+              </div>
+              <div class="ros-debug-btn-grid ros-debug-btn-grid--col">
+                <button id="ros-debug-tx-send" class="ros-btn" type="button">发布一次</button>
+                <button id="ros-debug-tx-stop" class="ros-btn" type="button">停止发布</button>
+              </div>
+            </div>
+            <textarea id="ros-debug-tx-payload" class="ros-debug-payload" rows="4" spellcheck="false"
+              placeholder='{"data": "hello"}  — 消息体 JSON 对象,类型需与话题匹配'
+              aria-label="发送消息 JSON"></textarea>
+          </section>
+        </div>
+      </aside>
+    </main>
+    <script type="module" src="./js/main.js?v=1071"></script>
+  </body>
+</html>

@@ -1,0 +1,65 @@
+# Deploy config for JXGw/himloco — v8ttrrrainel_14500 (2026-09-06)
+# v8_te8atnrr in (地形lat_v8_terrain ru8 ttrrrin)，网络接口与 v6 相同 (342 obs与/ 1 相同6 act)
+# 控制参数沿用 v6:5, commands_scale [2.0,2.0,0.25]
+# v6 = v5_stopsway weights + 500 incremental steps with:
+#   per-env wheel friction [0.6,1.4], wheel_dof_vel obs noise 4.0, stop-hold curriculum
+# Changes vs robot's current config.yaml (which points to Aug1 policy.onnx, kp160/kd4, vy_scale 1.5):
+#   1. model_name -> v6_sliprand_m12500_sim.onnx (v6, 16DOF / 342 obs)
+#   2. rl_kp/rl_kd = training values: legs 200/5.0, wheels 0/1.0
+#   3. fixed_kp/fixed_kd = 200/5.0 (robot had fixed_kd 4.0)
+#   4. commands_scale = [2.0, 2.0, 0.25] (robot had vy 1.5; training uses 2.0)
+# num_one_step_observations = 3 + 3 + 3 + 16 + 16 + 16 = 57
+# observations_history = 6 steps (current frame first, newest-first)
+
+JXGw/himloco:
+  model_name: "v6_sliprand_m12500_sim.onnx"
+  num_observations: 57
+  observations: ["ang_vel", "gravity_vec", "commands", "dof_pos", "dof_vel", "actions"]
+  observations_history: [0, 1, 2, 3, 4, 5]  # index 0 = newest frame
+  observations_history_priority: "time"
+  clip_obs: 100.0
+  clip_actions_lower: [-100.0, -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0, -100.0]
+  clip_actions_upper: [100.0, 100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0, 100.0]
+  rl_kp: [200.0, 200.0, 200.0, 0.0,
+          200.0, 200.0, 200.0, 0.0,
+          200.0, 200.0, 200.0, 0.0,
+          200.0, 200.0, 200.0, 0.0]
+  rl_kd: [5.0, 5.0, 5.0, 1.0,
+          5.0, 5.0, 5.0, 1.0,
+          5.0, 5.0, 5.0, 1.0,
+          5.0, 5.0, 5.0, 1.0]
+  fixed_kp: [200.0, 200.0, 200.0, 0.0,
+             200.0, 200.0, 200.0, 0.0,
+             200.0, 200.0, 200.0, 0.0,
+             200.0, 200.0, 200.0, 0.0]
+  fixed_kd: [5.0, 5.0, 5.0, 1.0,
+             5.0, 5.0, 5.0, 1.0,
+             5.0, 5.0, 5.0, 1.0,
+             5.0, 5.0, 5.0, 1.0]
+  num_of_dofs: 16
+  action_scale: [0.25, 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25, 0.25]
+  wheel_indices: [3, 7, 11, 15]
+  vel_scale: 10.0
+  lin_vel_scale: 2.0
+  ang_vel_scale: 0.25
+  dof_pos_scale: 1.0
+  dof_vel_scale: 0.05
+  commands_scale: [2.0, 2.0, 0.25]
+  torque_limits: [60.0, 60.0, 120.0, 17.0,
+                  60.0, 60.0, 120.0, 17.0,
+                  60.0, 60.0, 120.0, 17.0,
+                  60.0, 60.0, 120.0, 17.0]
+  default_dof_pos: [0.0, -0.55, 1.68, 0.0,
+                    0.0, -0.55, 1.68, 0.0,
+                    0.0, 0.55, -1.68, 0.0,
+                    0.0, 0.55, -1.68, 0.0]
+  joint_mapping: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]

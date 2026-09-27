@@ -1,0 +1,12 @@
+# ===== 以下由上传脚本生成：排除可重建 / 可重下载 / 嵌套上游仓库 =====
+# 编译产物（./build.sh 可重建）
+/cmake_build/
+# 运行日志
+/logs/
+# IDE 目录
+/.trae/
+# 预编译推理运行时（scripts/download_inference_runtime.sh 可重新下载）
+inference_runtime/
+# 上游公开仓库的内嵌克隆，需要时见 README「依赖」一节自行 clone
+/src/rl_sar_zoo/
+**/thirdparty/robot_sdk/unitree/

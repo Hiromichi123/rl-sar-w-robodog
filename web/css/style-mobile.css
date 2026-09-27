@@ -1,0 +1,420 @@
+/* ════════════════════════════════════════════════════════
+   移动版专用样式(mobile.html 独立版本,无媒体查询)
+   加载顺序:style.css(桌面基础) → 本文件无条件覆盖
+   来源:原 style.css 中全部 @media 响应式规则(去掉条件包装,
+   级联顺序与原文件保持一致)
+   ════════════════════════════════════════════════════════ */
+
+/* ── 录制列表(原 max-width:860px / 640px) ─────────────── */
+.recordings-list-header,
+.recordings-row { grid-template-columns: minmax(0, 2fr) minmax(0, 0.6fr) minmax(0, 1.2fr) minmax(0, 1.2fr) auto; }
+.recordings-list-header { display: none; }
+.recordings-row { grid-template-columns: 1fr; gap: 6px; padding: 12px 10px; }
+.recordings-row .rec-actions-col { justify-content: flex-start; }
+
+/* ── Twist 读数(原 max-width:768px) ───────────────────── */
+/* 作为 #movement-control-view 的直接子元素,order:-2 排在摇杆区(-1)之上 */
+/* 移动单行:不显示标题,x/y/z/ω 均分 + 帧数靠右(总高约 22px) */
+.twist-readout {
+  order: -2;
+  display: flex;
+  align-items: center;
+  margin: 0 0 6px;
+  padding: 2px 7px;
+}
+.twist-readout .twist-title { display: none; }
+.twist-readout .twist-vals {
+  grid-column: auto; grid-row: auto;
+  flex: 1 1 auto;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 2px;
+  line-height: 1.3;
+}
+.twist-readout .twist-count {
+  grid-column: auto; grid-row: auto;
+  flex-shrink: 0; margin-left: 8px;
+  font-size: 9px; padding: 0 5px; line-height: 1.5;
+}
+.twist-readout .twist-v { font-size: 9.5px; }
+.twist-readout .twist-v > span { font-size: 9px; }
+.twist-readout .twist-v output { font-size: 9.5px; padding: 0 3px; border-radius: 4px; }
+
+/* ── 话题调试:取消桌面对半 flex 分屏(手机面板仅半屏高,section 被压缩后
+   按钮行会溢出盖到发送区标题),改为自然高度、面板整体滚动 ── */
+.control-panel:has(#rosdebug-control-view:not([hidden])) { display: block; }
+#rosdebug-control-view:not([hidden]) {
+  display: block;
+  flex: none;
+}
+#rosdebug-control-view > section {
+  flex: none;
+  display: block;
+  margin-bottom: 10px;
+}
+#rosdebug-control-view > section:last-child { margin-bottom: 0; }
+
+/* ── 话题调试:输入框全宽在上、按钮横排在下(原桌面 2:1 双列在手机上挤压) ── */
+.ros-debug-io-row {
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ros-debug-stack {
+  grid-template-rows: none;
+  gap: 6px;
+}
+.ros-debug-stack .ros-debug-dd,
+.ros-debug-stack .ros-url-input { height: 34px; }
+/* 按钮区:接收区 4 个横排一行;发送区 2 个横排一行,不再跟随输入区高度 */
+.ros-debug-btn-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: none;
+  height: auto;
+}
+.ros-debug-btn-grid--col {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.ros-debug-btn-grid > * { min-height: 34px; font-size: 12px; padding: 0 4px; }
+.ros-debug-btn-grid .curves-tool-checkbox span { font-size: 12px; white-space: nowrap; }
+/* 提示文字:缩小防横切,日志/JSON 区适配 */
+#rosdebug-control-view .config-hint { font-size: 10.5px; line-height: 1.45; margin: 5px 0 0; }
+.ros-debug-log { flex: none; height: 140px; font-size: 10.5px; }
+.ros-debug-payload { flex: none; font-size: 11px; height: 80px; min-height: 64px; word-break: break-word; }
+#rosdebug-control-view .ros-debug-payload { flex: none; min-height: 64px; }
+
+/* ── 电机曲线行(原 max-width:768px) ───────────────────── */
+.motor-curve-row .motor-curve-name { font-size: 10px; }
+
+/* ── IMU 数值(原 max-width:768px) ─────────────────────── */
+.imu-cell output { font-size: 11.5px; }
+.imu-cell-rpy output { font-size: 12.5px; }
+.imu-grid-4 { grid-template-columns: repeat(2, 1fr); }
+
+/* ── 顶栏品牌(原 max-width:1024px) ────────────────────── */
+.brand { font-size: 13px; }
+
+/* ── 主布局:上下分屏同时显示(原 max-width:768px) ───────── */
+#app {
+  grid-template-columns: 1fr;
+  grid-template-rows: 55vh minmax(0, 1fr);
+}
+.control-panel {
+  border-left: none;
+  border-top: 1px solid var(--c-border);
+  padding: 12px 12px 20px;
+}
+.panel-toggle { display: none !important; }
+.panel-backdrop { display: none !important; }
+.topbar { height: 44px; padding: 0 10px; gap: 8px; }
+.brand { font-size: 12px; flex-shrink: 0; }
+.load-status { max-width: 100px; font-size: 11px; flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ROS 状态胶囊:单行显示(JS 在 ≤768px 已给精简文案),空间不足时省略号而非折行 */
+.ros-status {
+  flex: 0 1 auto; min-width: 0; margin-left: auto;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 10.5px; padding: 3px 7px;
+}
+.ros-pos-source select { height: 26px; padding: 0 6px; font-size: 11px; }
+.scene-tools { top: 48px; left: 10px; right: 10px; flex-wrap: wrap; gap: 4px; }
+.scene-tools button { padding: 0 8px; font-size: 11px; height: 26px; }
+/* 连接/断开 ROS 按钮保持单行,避免窄屏被压成"断开/ROS"竖排两行 */
+.scene-tools #ros-connect-btn { white-space: nowrap; flex-shrink: 0; padding: 0 10px; }
+.scene-tools .ros-url-input { width: 122px; height: 26px; font-size: 11px; }
+.annotation-toggle { height: 26px; }
+.hint { display: none; }
+
+/* ── 移动控制:摇杆/方向键提到 ROS 命令区上方,打开 tab 首屏即可驾驶,无需滚动 ──
+   必须用 :not([hidden]):裸 ID 选择器特异性(1,0,0)会压过
+   .control-view[hidden]{display:none}(0,2,0),导致该页签永远可见,
+   切到其他页签时残留内容顶在首屏,看起来像"切换后没加载" */
+#movement-control-view:not([hidden]) { display: flex; flex-direction: column; }
+#movement-humanoid-chassis,
+#movement-quadruped-chassis { order: -1; }
+/* 双摇杆左右布局:两个摇杆平分宽度,320px 窄屏也不溢出 */
+.joystick-dual { gap: 10px; margin: 10px 0 8px; }
+.joy-col { flex: 1 1 0; }
+.joystick-dual .joystick { width: 100%; max-width: 158px; aspect-ratio: 1 / 1; }
+.joystick-dual .joystick-knob { width: 54px; height: 54px; }
+/* 速度上限双滑条:触控目标 34px,贴在摇杆上方 */
+.joy-speed-bars { margin: 8px 0 2px; gap: 4px; }
+.joy-speed-bars .joy-gear-bar { margin: 0; gap: 7px; }
+/* 滑杆触控热区 34px */
+.joy-gear-track-wrap { height: 34px; }
+.joy-gear-slider { height: 34px; }
+.stepper-button { width: 46px; height: 40px; font-size: 19px; }
+.control-row input[type="range"] { height: 28px; }
+/* ROS 命令区下移后压缩留白,滚动到达时仍紧凑 */
+.ros-movement-section { margin-top: 4px; }
+.chassis-section { padding-bottom: 8px; }
+
+/* ── 小手机(原 max-width:380px) ───────────────────────── */
+.topbar { gap: 6px; padding: 0 10px; }
+.brand { font-size: 11px; }
+.load-status { max-width: 80px; }
+.scene-tools button { padding: 5px 7px; font-size: 10px; }
+.joystick-dual .joystick-knob { width: 48px; height: 48px; }
+
+/* ════════════════════════════════════════════════════════
+   移动版布局优化(v=1002)
+   ════════════════════════════════════════════════════════ */
+
+/* ── ① 标签栏:8 列均分在手机上文字挤压 → 改横向滑动,tab 保持自然宽度 ──
+   注意:不用负 sticky top(iOS 上负偏移 + 滚动后 tap 命中错位),
+   不用 -webkit-overflow-scrolling(与 sticky 组合有失效 bug);
+   touch-action: manipulation 消除双击缩放判定导致的 tap 丢失 */
+.control-tabs {
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;               /* Firefox 隐藏滚动条 */
+  gap: 2px;
+  top: 0;
+  touch-action: manipulation;
+}
+.control-tabs::-webkit-scrollbar { display: none; }
+.control-tabs button {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 8px 11px;
+  font-size: 12px;
+  touch-action: manipulation;
+}
+
+/* ── ② 场景工具栏:全部控件平铺在顶部(不收起)。
+   display:contents 拆平 view-buttons/scene-options 分组容器,
+   让 11 个控件作为同级 flex item 自由重排:360px 下恰好 3 行
+   (模型+地址+连接 / real_pos+录制+注释+重心 / 4 个视图按钮) ── */
+.scene-tools {
+  top: 48px;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 7px;
+  background: var(--c-bar-bg);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--c-border);
+}
+.scene-tools > .ros-pos-source,
+.scene-tools > .view-buttons,
+.scene-tools > .scene-options {
+  display: contents;   /* 容器"消失",内部按钮直接参与工具条 flex 换行 */
+}
+/* 拆平后直接子项(select 包裹层/按钮/checkbox label)统一次寸与去边框 */
+.scene-tools > .ros-url-dd { flex: 0 0 auto; }
+.scene-tools .view-buttons > *,
+.scene-tools .scene-options > * { border-left: none; }
+/* 桌面端组间竖线挂在首个 annotation-toggle 上(特异性 0,4,0),移动端需同特异性覆盖 */
+.scene-tools > .scene-options > .annotation-toggle:first-child {
+  border-left: none; padding-left: 9px;
+}
+.mobile-tools-btn, #mobile-tools-toggle { display: none !important; }
+
+/* ── 场景工具栏下移并入控制区(mobile.html 内联脚本已把节点搬到 .control-tabs 前) ──
+   由"场景左上浮层"变为面板内正常流:全宽、横向与页签 12px 对齐、融入面板背景,
+   去掉独立圆角边框,视觉上与下方页签栏连成一块 ── */
+.control-panel > .scene-tools {
+  position: static;
+  top: auto; left: auto; right: auto;
+  z-index: auto;
+  max-width: none;
+  margin: 0;
+  gap: 5px;                       /* 行间距/控件间距同步收紧 */
+  padding: 6px 12px 2px;
+  border: none;
+  border-radius: 0;
+  background: var(--c-panel-bg);
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+/* 进一步压缩:控件 38px/14px → 28px/12px,水平留白 14→10,三行总高约 140→102
+   前缀用 #control-panel(ID 特异性)压过 style.css 的 #control-panel select{font-size:13px} */
+#control-panel > .scene-tools button,
+#control-panel > .scene-tools select,
+#control-panel > .scene-tools .annotation-toggle,
+#control-panel > .scene-tools #ros-url-input {
+  height: 28px;
+  min-height: 28px;
+  font-size: 12px;
+  padding-left: 10px;
+  padding-right: 10px;
+  border-radius: 6px;
+}
+#control-panel > .scene-tools select {
+  padding-right: 22px;
+  background-size: 10px;
+  background-position: right 7px center;
+}
+#control-panel > .scene-tools .annotation-toggle { gap: 5px; }
+#control-panel > .scene-tools .annotation-toggle input {
+  width: 14px; height: 14px;
+  border-width: 1px;
+}
+#control-panel > .scene-tools #rec-dot {
+  width: 9px; height: 9px;
+  margin-right: 2px;
+}
+/* 工具条与页签贴合:页签顶部留白收紧,二者成组 */
+#control-panel > .scene-tools + .control-tabs { padding-top: 4px; }
+
+/* ── ③ 数据看板:12 列电机表横向滚动(表头与数据同容器同步滚动) ── */
+.dash-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+.dash-scroll .dashboard-motor-head,
+.dash-scroll .dash-motor-row { min-width: 620px; }
+.dash-scroll .dashboard-motor-head {
+  position: static;           /* 容器即滚动视口,sticky 表头失去意义,改随行滚动 */
+  top: auto;
+}
+
+/* ── ④ 细节:面板内上下留白收紧、摇杆区呼吸感 ── */
+/* 面板 padding 归零:页签栏全宽贴死面板顶部(sticky top:0 无缝隙),
+   横向/底部留白下放到 tabs 与各 .control-view 自理 */
+.control-panel { padding: 0; }
+.control-tabs {
+  margin: 0 0 8px;                /* 覆盖桌面版 -16px 负 margin(移动版无 16px padding 可抵消) */
+  padding: 6px 12px 5px;
+  top: 0;
+}
+.control-view { padding: 0 12px 16px; }
+.cartesian-section { margin-bottom: 10px; }
+
+/* ── 通知面板:移动端全宽底部弹出 ── */
+.notify-btn { height: 28px; min-width: 28px; font-size: 13px; padding: 0 4px; }
+.notify-badge { min-width: 14px; height: 14px; font-size: 9px; line-height: 14px; top: -5px; right: -5px; }
+/* 移动版工具条已搬入 control-panel(static),通知面板也改为 fixed 全宽 */
+#control-panel > .scene-tools ~ .notify-panel,
+.scene-tools ~ .notify-panel {
+  position: fixed; top: auto; bottom: 0; right: 0; left: 0;
+  width: 100%; max-width: 100%; max-height: 50vh;
+  border-radius: 10px 10px 0 0;
+}
+
+/* ── 相机页签:触屏加大点击区,舞台 16:9 ── */
+.camera-toolbar { flex-direction: column; align-items: stretch; }
+.cam-channels { width: 100%; }
+.cam-ch { flex: 1; text-align: center; font-size: 12px; padding: 8px 6px; }
+.cam-state { align-self: flex-start; }
+.cam-stage { aspect-ratio: 16 / 10; }
+.cam-placeholder { font-size: 12px; }
+.cam-datagrid { gap: 6px 6px; }
+.cam-dim { font-size: 11px; padding: 6px 4px; }
+.cam-card { padding: 10px; }
+.cam-status-pre { max-height: 90px; }
+
+/* ── 雷达页签:按钮触控加大,数据卡竖排 ── */
+.lidar-tools { width: 100%; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.lidar-btn { text-align: center; font-size: 12px; padding: 9px 6px; }
+.lidar-size-ctl {
+  grid-column: 1 / -1;
+  justify-content: center; padding: 8px 12px; font-size: 12px;
+}
+.lidar-size-ctl input[type="range"] { flex: 1; max-width: 320px; height: 4px; }
+.lidar-size-ctl span { min-width: 32px; font-size: 11px; }
+#lidar-control-view .camera-data {
+  grid-template-columns: 1fr;
+}
+.lidar-atti { width: 148px; height: 148px; }
+.lidar-wave-legend { margin-left: 0; }
+
+/* ════════════════════════════════════════════════════════
+   三页签精简布局:移动控制 / 数据看板 / 仿真
+   - 顶部旧画布区(.viewport)始终隐藏;控制面板占满全屏
+   - 仿真不再占据顶部区域,而是作为「仿真」页签的内容:
+     canvas/注释层/遮罩已由 mobile.html 内联脚本搬入 #sim-control-view,
+     画布在页签栏下方的容器内铺满,工具条多换行时面板自然滚动
+   ════════════════════════════════════════════════════════ */
+
+/* 顶栏搬入控制面板:取消画布悬浮定位,作为面板首行正常排版 */
+.control-panel > .topbar {
+  position: static;
+  pointer-events: auto;
+  height: 40px;
+  padding: 0 12px;
+  gap: 8px;
+  margin: 0 0 6px;
+}
+
+/* 单行列:旧画布区隐藏,面板全屏(覆盖上方 55vh + 1fr 的双行规则) */
+#app { grid-template-rows: minmax(0, 1fr); }
+.viewport { display: none !important; }
+
+/* 仿真页签容器:页签内容内的 3D 视口,纵向 = 工具条 + 舞台。
+   高度 = 视口高 - 顶栏/工具条/页签栏(约 165px);工具条多行时面板自然滚动;
+   横屏等矮视口保底 300px */
+#sim-control-view[hidden] { display: none; }
+#sim-control-view:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  padding: 0;
+  margin: 0 0 12px;
+  height: calc(100dvh - 165px);
+  min-height: 300px;
+  overflow: hidden;
+  background: #060b12;
+  border-top: 1px solid var(--c-border);
+}
+/* 仿真工具条:模型切换/位置源/视角/注释/重心;sim-off 时整体隐藏 */
+.sim-toolbar {
+  flex: 0 0 auto;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 6px 8px;
+  background: rgba(10, 16, 26, 0.92);
+  border-bottom: 1px solid var(--c-border);
+}
+body.sim-off .sim-toolbar { display: none; }
+.sim-toolbar .ros-pos-source { margin: 0; }
+/* 紧凑图标化:4 个视角按钮 = 等宽小方块(⌂/正/侧/底),与下拉/勾选高度对齐。
+   按钮从 .scene-tools 搬入后原配色选择器(.scene-tools button)失配,在此补齐 */
+.sim-toolbar button {
+  border: 1px solid var(--c-input-border);
+  border-radius: 8px;
+  background: rgba(24, 37, 58, 0.85);
+  color: var(--c-label);
+  transition: background 0.15s, border-color 0.15s;
+}
+.sim-toolbar button:active { background: var(--c-card-hover); border-color: var(--c-accent); }
+.sim-toolbar #view-home,
+.sim-toolbar #view-front,
+.sim-toolbar #view-side,
+.sim-toolbar #view-bottom {
+  min-width: 34px; height: 30px;
+  padding: 0; font-size: 13px; line-height: 1;
+}
+.sim-toolbar .ros-pos-source select { height: 30px; font-size: 12px; }
+.sim-toolbar .annotation-toggle { height: 30px; }
+/* 3D 舞台:画布/注释层/遮罩的定位父级,占满工具条以外的剩余高度 */
+#sim-stage { position: relative; flex: 1 1 auto; min-height: 0; }
+#sim-stage #scene { width: 100%; height: 100%; display: block; }
+
+/* 仅剩四个页签:均分整行,不再横向滚动 */
+.control-tabs { overflow-x: hidden; }
+.control-tabs button {
+  flex: 1 1 0;
+  padding: 8px 6px;
+  text-align: center;
+}
+
+/* 顶部仿真开关隐藏:移动端仿真启停由「仿真」页签联动承担,功能重复 */
+#sim-toggle-btn { display: none !important; }
+
+/* 移动控制页常用姿态命令快捷条:检查站立/站立/趴下/强化学习 强制一排四等分。
+   minmax(0,1fr)+min-width:0 允许列收缩到内容以下;按钮 nowrap+省略,
+   保证 320px 窄屏也不换行成两排 */
+.quick-behavior-bar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 8px 0 2px;
+}
+.quick-behavior-bar .behavior-pill {
+  min-width: 0;
+  padding: 10px 2px;
+  font-size: 11.5px;
+  letter-spacing: -0.2px;
+  border-radius: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
