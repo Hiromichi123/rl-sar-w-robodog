@@ -1,0 +1,61 @@
+# RL SAR JXG 机器人主程序开机自启动服务(裸机直跑,非容器)。
+# 作用: CAN 初始化已由 rl-sar-can-setup.service 独立负责; 本服务等待 CAN UP 后
+#       拉起 rl_real_JXG(wheel 模式, 上电 passive 不会动电机),
+#       内置 WebSocket 服务器同端口(:8088)托管 Web 调试台与实时遥测。
+#
+# 实时调度模型(线程内自行设置 SCHED_FIFO,见 loop.hpp / usb2can.cpp):
+#   loop_imu  1kHz  FIFO 90  CPU4      CAN tx/rx  FIFO 85  CPU5
+#   loop_control 200Hz FIFO 80 CPU4    loop_rl 50Hz FIFO 70 CPU6
+#   loop_gamepad 200Hz FIFO 55 不绑核   Web/音频/主线程 普通调度 CPU7
+#
+# 本机厂商内核开启 CONFIG_RT_GROUP_SCHED 且 cgroup v2 无 RT 带宽分配接口,
+# system.slice 等所有子 cgroup 的 RT runtime=0,即使有 CAP_SYS_NICE 也无法设 FIFO。
+# 因此本服务以 root 运行,start.sh 启动时会把自身迁入根 cgroup(唯一有 RT 预算的
+# cgroup),随后 exec 主程序,全部线程继承。KillMode=process 是必须的:进程迁出
+# 本 unit 的 cgroup 后,默认 control-group 回收方式将无法再向主进程发信号。
+#
+# 安装(需 root):
+#   sudo cp rl-real-jxg.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now rl-real-jxg.service
+# 状态/日志:
+#   systemctl status rl-real-jxg
+#   journalctl -u rl-real-jxg -f
+#
+# 安全说明: 仅开机自动拉起(电机 passive 不会动); 故意不配置崩溃自动重启——
+#           电机状态不明时反复重启可能意外使能电机, 需人工确认后手动执行 restart。
+
+[Unit]
+Description=RL SAR JXG robot main program (rl_real_JXG bare metal + built-in web console)
+After=network-online.target rl-sar-can-setup.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 必须 root:start.sh 需写 /sys/fs/cgroup/cgroup.procs 迁入根 cgroup(见上方说明)
+User=root
+Group=root
+WorkingDirectory=/home/jinjiao/rl_sar-w2_recovered_v1
+# 大核(CPU4-7,RK3588 policy4)锁定 performance,消除 ondemand 升频延迟抖动
+ExecStartPre=/bin/sh -c 'echo performance > /sys/devices/system/cpu/cpufreq/policy4/scaling_governor || true'
+ExecStart=/home/jinjiao/rl_sar-w2_recovered_v1/scripts/start.sh
+# 进程迁出 unit cgroup 后,按主 PID 直接发信号(程序会优雅收线程并退出)
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=10
+# 普通线程(Web/音频/主线程)的基础优先级
+Nice=-10
+# RT 调度资源放开(根 cgroup RT 预算是 FIFO 生效的决定因素,rlimit 是双保险)
+LimitRTPRIO=99
+LimitNICE=-20
+# mlockall 锁内存: systemd 默认 LimitMEMLOCK 仅 64K,不放开会导致 mlockall ENOMEM
+LimitMEMLOCK=infinity
+# 注意:不能把 CapabilityBoundingSet 裁剪到仅剩 CAP_SYS_NICE ——
+# /home/jinjiao 为 0750,失去 CAP_DAC_OVERRIDE 的 root 无法穿越该目录,
+# ld.so 读不到二进制及 RPATH 下的库,execve 直接 EACCES(服务退出码 126)。
+# root 身份天然持有 CAP_SYS_NICE,无需 AmbientCapabilities/文件能力。
+# 进程整体限定在大核 CPU4-7;线程内再做精细绑核
+CPUAffinity=4 5 6 7
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
