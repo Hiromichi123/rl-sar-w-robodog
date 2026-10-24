@@ -1,0 +1,22 @@
+# candleLight USB-CAN udev 规则：按通道 MCU 序列号固定 SocketCAN 接口名
+# （序列号烧在五路一体盒每通道 MCU 内，与一体盒插在哪个 USB 口/总线无关；
+#   早期按 KERNELS=="3-1.x" 物理端口映射，上游线换口(Bus3→Bus1)后整体失配，
+#   已废弃端口方案。改名冲突由 scripts/can_setup.sh 两阶段腾挪兜底）
+#
+# 序列号尾段 4348570220313938 为五路共用，前 8 位区分通道:
+#   FL=can0  FR=can1  RL=can2  RR=can3  备用=can4
+
+# FL 腿 - 通道 004B001F
+SUBSYSTEM=="net", ATTRS{serial}=="004B001F*", NAME="can0"
+
+# FR 腿 - 通道 004B003C
+SUBSYSTEM=="net", ATTRS{serial}=="004B003C*", NAME="can1"
+
+# RL 腿 - 通道 004C0026
+SUBSYSTEM=="net", ATTRS{serial}=="004C0026*", NAME="can2"
+
+# RR 腿 - 通道 004C0029
+SUBSYSTEM=="net", ATTRS{serial}=="004C0029*", NAME="can3"
+
+# 备用第5路 - 通道 004B0041
+SUBSYSTEM=="net", ATTRS{serial}=="004B0041*", NAME="can4"

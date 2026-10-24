@@ -16,7 +16,7 @@ import * as THREE from 'three';
 import { Matrix, inverse } from 'ml-matrix';
 import { jointStates, bodyObjects, visibleControls, cartesianArms, activeStepperStops, shared, currentModelId } from './state.js?v=1';
 import { setJointPose, syncStateInputs, stopActiveStepperMotion } from './joints.js?v=1';
-import { createJoystick } from './joystick.js?v=1001';
+import { createJoystick } from './joystick.js?v=1005';
 
 // ── 摇杆速度上限:线速度 + 角速度两个连续可调滑条(D-pad 与手柄同样生效) ──
 /** 速度上限的滑条量程 */
@@ -407,6 +407,7 @@ function makeLeftJoyHandlers() {
     },
     onEnd: () => {
       const j = shared.joystick;
+      if (j.cruiseLockedLeft) return true;  // 左杆速度锁定:松手不回中、不衰减,保持当前 vx/vy
       j.decayLeftVx = j.vx; j.decayLeftVy = j.vy;
       j.decayLeftStartAt = performance.now();
       j.lastUpdateAt = performance.now();
@@ -420,7 +421,7 @@ function makeRightJoyHandlers() {
   return {
     onMove: (nx, ny) => {
       const j = shared.joystick;
-      j.decayRightStartAt = 0;  // 重新握住即取消衰减
+      j.decayRightStartAt = 0;  // 重新握住即取消高度衰减
       j.omega = Math.round(-nx * getJoystickMaxAngular() * 100) / 100;
       j.znx = nx; j.zny = ny;
       applyJoystickLift(ny);
@@ -430,13 +431,63 @@ function makeRightJoyHandlers() {
     },
     onEnd: () => {
       const j = shared.joystick;
+      j.lastUpdateAt = performance.now();
+      j.msgCount += 1;
+      if (j.cruiseLockedRight) return true;  // 右杆转向/高度锁定:松手不回中、不衰减,保持当前 ω 与 Z
       j.decayRightOmega = j.omega;
       j.decayRightLift = getJoystickLift();
       j.decayRightStartAt = performance.now();
-      j.lastUpdateAt = performance.now();
-      j.msgCount += 1;
     },
   };
+}
+
+/**
+ * 左/右摇杆锁定(定速巡航)开关,两杆各自独立。
+ * 开启:以开启瞬间的当前值为锁定值("拨到哪,停在哪"),取消本杆进行中的衰减;
+ *      此后本杆仍可拨动调整,但松手不回中、不衰减(旋钮位置保持)。
+ *      左杆锁 vx/vy;右杆锁 ω 与 Z(高度),互不影响。
+ * 关闭:本杆对应轴立即归零停车/回站姿(触发零速尾帧),本杆旋钮回中,
+ *      恢复常规松手回正;另一杆锁定状态不变。
+ * 运行时态,刻意不持久化(刷新/重连必须默认关)。
+ * @param {boolean} on
+ */
+export function setCruiseLockLeft(on) {
+  const j = shared.joystick;
+  const locked = !!on;
+  if (j.cruiseLockedLeft === locked) return;
+  j.cruiseLockedLeft = locked;
+  j.decayLeftStartAt = 0;  // 取消左杆进行中的速度衰减
+  const c1 = document.querySelector('#quad-chassis-joystick');
+  if (!locked) {
+    j.vx = 0; j.vy = 0;          // 关闭即停车(X/Y)
+    c1?._joystickReset?.();      // 左杆旋钮回中
+  } else {
+    // 旋钮对齐到锁定速度(松手后衰减再锁定的场景:旋钮已回中,需拉回对应位置)
+    const maxLin = getJoystickMaxLinear() || 1;
+    c1?._joystickSetNorm?.(-j.vy / maxLin, j.vx / maxLin);
+  }
+  // 锁定时 vx/vy 原值即锁定值;两种情况都显式推一帧刷新 keep-alive 与界面读数
+  pushJoystickCommand();
+  j.lastUpdateAt = performance.now();
+}
+
+export function setCruiseLockRight(on) {
+  const j = shared.joystick;
+  const locked = !!on;
+  if (j.cruiseLockedRight === locked) return;
+  j.cruiseLockedRight = locked;
+  j.decayRightStartAt = 0;  // 取消右杆进行中的 ω/Z 衰减
+  const c2 = document.querySelector('#quad-chassis-joystick-z');
+  if (!locked) {
+    j.omega = 0;                 // 转向归零
+    applyJoystickLift(0);        // 高度 Z 回站姿
+    c2?._joystickReset?.();      // 右杆旋钮回中
+  } else {
+    const maxAng = getJoystickMaxAngular() || 1;
+    c2?._joystickSetNorm?.(-j.omega / maxAng, getJoystickLift());
+  }
+  pushJoystickCommand();
+  j.lastUpdateAt = performance.now();
 }
 
 // ── 四足机器人腿部 IK 控制 ────────────────────────────────

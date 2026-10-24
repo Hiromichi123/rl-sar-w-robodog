@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#111827" />
+    <title>登录 · 机器人控制台</title>
+    <link rel="stylesheet" href="./css/login.css?v=2" />
+  </head>
+  <body>
+    <main class="login-wrap">
+      <div class="login-card">
+        <div class="login-logo">🤖</div>
+        <h1>机器人控制台</h1>
+        <p class="login-sub">请输入管理令牌后登录</p>
+        <form class="login-form" id="login-form">
+          <input
+            class="login-input"
+            id="login-token"
+            type="password"
+            placeholder="WEB_ADMIN_TOKEN"
+            autocomplete="current-password"
+            spellcheck="false"
+            required
+          />
+          <button class="login-btn" id="login-btn" type="submit">登 录</button>
+          <p class="login-err" id="login-err" hidden></p>
+        </form>
+        <p class="login-hint">
+          令牌由服务端环境变量 <code>WEB_ADMIN_TOKEN</code> 配置,登录状态保持 30 天
+        </p>
+      </div>
+    </main>
+    <script>
+      (function () {
+        var form = document.getElementById('login-form');
+        var input = document.getElementById('login-token');
+        var btn = document.getElementById('login-btn');
+        var errEl = document.getElementById('login-err');
+
+        function showError(msg) {
+          errEl.textContent = msg;
+          errEl.hidden = false;
+        }
+
+        // 判断登录后跳转桌面版还是移动版(与 mobile.html 入口检测保持一致)
+        function isMobileDevice() {
+          if (/Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent)) return true;
+          var touch = navigator.maxTouchPoints > 1
+            && window.matchMedia('(pointer: coarse)').matches;
+          return (touch || window.innerWidth <= 768);
+        }
+
+        // 进入页面先探测:服务端未启用鉴权时直接进入控制台,不把用户卡在登录页
+        fetch('./api/login', { cache: 'no-store' })
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.authRequired === false) {
+              window.location.replace('./');
+            } else {
+              input.focus();
+            }
+          })
+          .catch(function () { input.focus(); });
+
+        form.addEventListener('submit', function (ev) {
+          ev.preventDefault();
+          errEl.hidden = true;
+          var tok = input.value;
+          if (!tok) { showError('请输入管理令牌'); return; }
+          btn.disabled = true;
+          var body = 'token=' + encodeURIComponent(tok);
+          fetch('./api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body,
+          })
+            .then(function (r) {
+              return r.json().then(function (j) { return { status: r.status, j: j }; });
+            })
+            .then(function (res) {
+              if (res.status === 200 && res.j && res.j.ok) {
+                // 兼容主应用现有 localStorage 令牌机制(Cookie 之外的第二通道)
+                try { window.localStorage.setItem('jxg_admin_token', tok); } catch (e) {}
+                window.location.replace(isMobileDevice() ? './mobile.html' : './index.html');
+              } else {
+                showError('令牌错误,请重新输入');
+                btn.disabled = false;
+                input.select();
+              }
+            })
+            .catch(function () {
+              showError('网络错误,请检查连接后重试');
+              btn.disabled = false;
+            });
+        });
+      })();
+    </script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('./service-worker.js').catch(function () {});
+        });
+      }
+    </script>
+  </body>
+</html>

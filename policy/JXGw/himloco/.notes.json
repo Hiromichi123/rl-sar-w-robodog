@@ -1,0 +1,11 @@
+{
+  "policy_v3_sim.onnx": "测试备注内容",
+  "policy_v7_sim.onnx": "异常，进入rl深蹲",
+  "policy_v6_sim.onnx": "正常，但转弯有问题",
+  "policy_v24_deploybias_m3400_sim.onnx": "四条腿仿生，平地无问题",
+  "policy_v56_deploybias_m3899_sim.onnx": "腿驱-稳定版可左侧前走后退会出现偏移",
+  "policy_v59f_m4899_deploybias_sim.onnx": "无法转弯",
+  "policy_v57b_m4199_deploybias_sim.onnx": "进入强化学习后抖动",
+  "policy_v60d_m4496_deploybias_sim.onnx": "轮驱-拐弯费劲",
+  "policy_v60f_m499_sim.onnx": "进入强化学习后开始抖动"
+}

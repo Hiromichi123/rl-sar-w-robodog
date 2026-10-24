@@ -6,7 +6,6 @@
 #ifndef FSM_ALL_HPP
 #define FSM_ALL_HPP
 
-#include "fsm_JXG.hpp"
 #include "fsm_JXGw.hpp"
 
 #endif // FSM_ALL_HPP

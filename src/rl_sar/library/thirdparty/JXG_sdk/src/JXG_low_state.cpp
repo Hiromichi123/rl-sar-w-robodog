@@ -7,7 +7,11 @@
 
 extern RobotMotorManager motor_manager;
 
+static bool yaw_initialized = false;
+static double yaw_initial = 0.0;
 static std::atomic<bool> imu_stream_enabled{true};
+// 缓存初始四元数的 yaw 补偿旋转（避免每帧重复构造）
+static Eigen::Quaterniond yaw_offset_conj(1, 0, 0, 0);
 
 
 void SetJXGIMUStreamEnabled(bool enabled) {
@@ -48,6 +52,9 @@ static void FillFrozenIMUState(JXGLowState &state) {
     state.imu_state.velocity_body[2] = 0.0;
 }
 
+// 四元数 → RPY（定义在文件尾部，前向声明供 fillIMUDataToJXGLowState 使用）
+inline void quaternionToRPY(float w, float x, float y, float z, double& roll, double& pitch, double& yaw);
+
 // RPY → 四元数（w, x, y, z），ZYX 内旋顺序
 void rpyToQuaternion(double roll, double pitch, double yaw, double quaternion[4]) {
     Eigen::Quaterniond q;
@@ -69,27 +76,50 @@ void fillIMUDataToJXGLowState(JXGLowState &state) {
     Eigen::Matrix<float, 1, 3> gyro = getAngleVelocity();
     Eigen::Matrix<float, 1, 3> acc  = get_com_Acc();
 
-    // roll/pitch 来源二选一，yaw 一律用本地积分器（getYawFused：陀螺零偏补偿 + 静止冻结 ZUPT）。
-    // 原因：6 轴 IMU 无磁力计，固件内部 yaw 会随陀螺零偏持续漂移（实测约 -6°/min），不能直接用。
-    double roll = 0.0, pitch = 0.0;
     float raw_q[4];
     if (getQuaternion(raw_q)) {
-        // 四元数路径：从固件四元数只提取 roll/pitch（ZYX 内旋）
+        // ========== 四元数路径：直接用 DM-IMU 输出的四元数 ==========
         Eigen::Quaterniond q_raw(raw_q[0], raw_q[1], raw_q[2], raw_q[3]);
         q_raw.normalize();
-        const double sinr_cosp = 2.0 * (q_raw.w() * q_raw.x() + q_raw.y() * q_raw.z());
-        const double cosr_cosp = 1.0 - 2.0 * (q_raw.x() * q_raw.x() + q_raw.y() * q_raw.y());
-        roll = std::atan2(sinr_cosp, cosr_cosp);
-        const double sinp = 2.0 * (q_raw.w() * q_raw.y() - q_raw.z() * q_raw.x());
-        pitch = (std::abs(sinp) >= 1.0) ? std::copysign(M_PI / 2.0, sinp) : std::asin(sinp);
+
+        // 首次收到四元数：记录初始 yaw，构造补偿旋转
+        if (!yaw_initialized) {
+            // 从四元数提取 yaw (ZYX)
+            double siny = 2.0 * (q_raw.w() * q_raw.z() + q_raw.x() * q_raw.y());
+            double cosy = 1.0 - 2.0 * (q_raw.y() * q_raw.y() + q_raw.z() * q_raw.z());
+            yaw_initial = std::atan2(siny, cosy);
+            yaw_initialized = true;
+            // 构造纯 yaw 旋转的四元数并取共轭（用于左乘消除初始航向）
+            yaw_offset_conj = Eigen::Quaterniond(
+                std::cos(-yaw_initial / 2.0), 0, 0, std::sin(-yaw_initial / 2.0));
+            std::cout << "[DM-IMU] Yaw initialized to: " << yaw_initial << " rad ("
+                      << yaw_initial * 180.0 / M_PI << " deg)" << std::endl;
+        }
+
+        // q_relative = q_yaw_offset_conj * q_raw  （消除初始航向，保留 roll/pitch）
+        Eigen::Quaterniond q_relative = yaw_offset_conj * q_raw;
+        q_relative.normalize();
+
+        // 硬件四元数 yaw 无磁力计会随陀螺零偏持续漂移(实测约 -6°/min):
+        // 这里只取重力对准可靠的 roll/pitch,yaw 强制改用本地积分器
+        // (陀螺零偏补偿 + 静止冻结 ZUPT,上电为 0 相对航向),与下方欧拉路径同源。
+        double roll, pitch, yaw_hw;
+        quaternionToRPY(static_cast<float>(q_relative.w()), static_cast<float>(q_relative.x()),
+                        static_cast<float>(q_relative.y()), static_cast<float>(q_relative.z()),
+                        roll, pitch, yaw_hw);
+        rpyToQuaternion(roll, pitch, static_cast<double>(getYawFused()), state.imu_state.quaternion);
+
     } else {
-        // 欧拉角路径：roll/pitch 用 IMU 融合输出（加速度计修正，可靠）
+        // ========== 欧拉角路径（当前 DM-IMU 配置只输出 加速度/角速度/欧拉角） ==========
+        // roll/pitch 用 IMU 融合输出（加速度计修正，可靠）；
+        // yaw 改用本地积分器：陀螺零偏补偿 + 静止冻结(ZUPT)，上电为 0（相对航向）。
+        // 原因：6 轴 IMU 无磁力计，其内部 yaw 会随陀螺零偏持续漂移（实测约 -6°/min）。
         Eigen::Matrix<float, 1, 3> rpy = getAngle();
-        roll  = rpy[0];
-        pitch = rpy[1];
+        double roll  = rpy[0];
+        double pitch = rpy[1];
+        double yaw   = getYawFused();
+        rpyToQuaternion(roll, pitch, yaw, state.imu_state.quaternion);
     }
-    const double yaw = getYawFused();
-    rpyToQuaternion(roll, pitch, yaw, state.imu_state.quaternion);
 
     // 陀螺仪
     state.imu_state.gyroscope[0] = gyro[0];
@@ -101,28 +131,33 @@ void fillIMUDataToJXGLowState(JXGLowState &state) {
     state.imu_state.accelerometer[1] = acc[1];
     state.imu_state.accelerometer[2] = acc[2];
 
-    // 每 500 次调用打印一次 IMU 数据（~1秒 @ 500Hz 控制频率）
-    static int imu_print_cnt = 0;
-    if (++imu_print_cnt >= 500) {
-        imu_print_cnt = 0;
-        printf("[DM-IMU] quat=[%.3f, %.3f, %.3f, %.3f]  gyro=[%.3f, %.3f, %.3f]  acc=[%.3f, %.3f, %.3f]\n",
-               state.imu_state.quaternion[0], state.imu_state.quaternion[1],
-               state.imu_state.quaternion[2], state.imu_state.quaternion[3],
-               state.imu_state.gyroscope[0], state.imu_state.gyroscope[1], state.imu_state.gyroscope[2],
-               state.imu_state.accelerometer[0], state.imu_state.accelerometer[1], state.imu_state.accelerometer[2]);
-    }
+    // 注意:本函数由实时线程(GetState→200Hz控制环)高频调用,
+    // 禁止在此 printf/stdout 写入——journal 管道慢写会持 stdio 锁阻塞,
+    // 曾造成 loop_control 单帧迟 6.2ms 的孤立超期;IMU 数据经 ROS 话题进数据看板,无需控制台转储。
 }
 
 void resetYawZero() {
+    yaw_initialized = false;
+    yaw_offset_conj = Eigen::Quaterniond(1, 0, 0, 0);
     resetFusedYaw();
-    std::cout << "[DM-IMU] Yaw zero reset." << std::endl;
+    std::cout << "[DM-IMU] Yaw zero reset. Will re-initialize on next update." << std::endl;
 }
 
 void updateJXGLowState(JXGLowState& state)
 {
     fillIMUDataToJXGLowState(state);
 
-    auto all_feedback = motor_manager.getAllMotorFeedback();
+    // 零分配:本函数仅由 200Hz 控制环调用,静态缓冲区线程安全。
+    static RobotMotorManager::AllMotorFeedback all_feedback = []{
+        RobotMotorManager::AllMotorFeedback a;
+        a.pos.resize(16);
+        a.vel.resize(16);
+        a.tau.resize(16);
+        a.temp.resize(16);
+        a.error.assign(16, 0.0f);
+        return a;
+    }();
+    motor_manager.getAllMotorFeedback(all_feedback);
 
     const int expected_motors = 16;
     const int n = std::min<int>(expected_motors, std::min({(int)all_feedback.pos.size(),

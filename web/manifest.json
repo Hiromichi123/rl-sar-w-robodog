@@ -1,0 +1,20 @@
+{
+  "name": "RL SAR 机器人控制台",
+  "short_name": "机器人控制",
+  "description": "四足机器人强化学习控制与遥测控制台",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#111827",
+  "theme_color": "#111827",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='40' fill='%23111827'/><text x='96' y='130' font-size='110' text-anchor='middle' fill='%2360a5fa'>🤖</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

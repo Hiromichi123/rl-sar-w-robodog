@@ -1,12 +1,12 @@
 # RL SAR JXG 机器人主程序开机自启动服务(裸机直跑,非容器)。
 # 作用: CAN 初始化已由 rl-sar-can-setup.service 独立负责; 本服务等待 CAN UP 后
-#       拉起 rl_real_JXG(wheel 模式, 上电 passive 不会动电机),
-#       内置 WebSocket 服务器同端口(:8088)托管 Web 调试台与实时遥测。
+#       拉起 rl_real_JXG(wheel 模式, 上电 passive 不会动电机)。
+#       (v4: ROS2 话题与内置 Web 调试台 :8088 共存;另有 rosbridge :9090)
 #
 # 实时调度模型(线程内自行设置 SCHED_FIFO,见 loop.hpp / usb2can.cpp):
 #   loop_imu  1kHz  FIFO 90  CPU4      CAN tx/rx  FIFO 85  CPU5
 #   loop_control 200Hz FIFO 80 CPU4    loop_rl 50Hz FIFO 70 CPU6
-#   loop_gamepad 200Hz FIFO 55 不绑核   Web/音频/主线程 普通调度 CPU7
+#   loop_gamepad 200Hz FIFO 55 不绑核   音频/主线程 普通调度 CPU7
 #
 # 本机厂商内核开启 CONFIG_RT_GROUP_SCHED 且 cgroup v2 无 RT 带宽分配接口,
 # system.slice 等所有子 cgroup 的 RT runtime=0,即使有 CAP_SYS_NICE 也无法设 FIFO。
@@ -15,17 +15,20 @@
 # 本 unit 的 cgroup 后,默认 control-group 回收方式将无法再向主进程发信号。
 #
 # 安装(需 root):
-#   sudo cp rl-real-jxg.service /etc/systemd/system/
-#   sudo systemctl daemon-reload && sudo systemctl enable --now rl-real-jxg.service
+#   sudo bash scripts/service.sh install
+#
+# 本文件是模板: @REPO_ROOT@ 由 scripts/install_service.sh 在安装时按脚本自身
+# 所在目录自动渲染(整目录复制为 v5/vN 后无需再改本文件的任何路径)。
 # 状态/日志:
-#   systemctl status rl-real-jxg
-#   journalctl -u rl-real-jxg -f
+#   sudo bash scripts/service.sh status
+#   sudo bash scripts/service.sh logs
 #
 # 安全说明: 仅开机自动拉起(电机 passive 不会动); 故意不配置崩溃自动重启——
 #           电机状态不明时反复重启可能意外使能电机, 需人工确认后手动执行 restart。
+#           start.sh 内含 flock 单实例锁,防止双实例抢 CAN 总线丢失电机多圈零点。
 
 [Unit]
-Description=RL SAR JXG robot main program (rl_real_JXG bare metal + built-in web console)
+Description=RL SAR JXG robot main program (rl_real_JXG bare metal)
 After=network-online.target rl-sar-can-setup.service
 Wants=network-online.target
 
@@ -34,15 +37,15 @@ Type=simple
 # 必须 root:start.sh 需写 /sys/fs/cgroup/cgroup.procs 迁入根 cgroup(见上方说明)
 User=root
 Group=root
-WorkingDirectory=/home/jinjiao/rl_sar-w2_recovered_v1
-# 大核(CPU4-7,RK3588 policy4)锁定 performance,消除 ondemand 升频延迟抖动
+WorkingDirectory=@REPO_ROOT@
+# 大核(CPU4-7,RK3576 policy4)锁定 performance,消除 ondemand 升频延迟抖动
 ExecStartPre=/bin/sh -c 'echo performance > /sys/devices/system/cpu/cpufreq/policy4/scaling_governor || true'
-ExecStart=/home/jinjiao/rl_sar-w2_recovered_v1/scripts/start.sh
+ExecStart=@REPO_ROOT@/scripts/start.sh
 # 进程迁出 unit cgroup 后,按主 PID 直接发信号(程序会优雅收线程并退出)
 KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=10
-# 普通线程(Web/音频/主线程)的基础优先级
+# 普通线程(音频/主线程)的基础优先级
 Nice=-10
 # RT 调度资源放开(根 cgroup RT 预算是 FIFO 生效的决定因素,rlimit 是双保险)
 LimitRTPRIO=99

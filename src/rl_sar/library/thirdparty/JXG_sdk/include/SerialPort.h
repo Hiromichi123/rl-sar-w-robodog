@@ -3,6 +3,7 @@
 
 #include <termios.h>
 #include <sys/select.h>
+#include <errno.h>
 #include <string>
 #include <string.h>
 #include <fcntl.h>
@@ -58,6 +59,7 @@ public:
   }
 ssize_t send(const uint8_t* data, size_t len)
 {
+    if (fd_ < 0) return -1;
     ssize_t ret = ::write(fd_, data, len);
     if (ret < 0) {
         perror("[SerialPort] send 失败"); // 打印系统错误原因（如权限、设备断开）
@@ -68,24 +70,11 @@ ssize_t send(const uint8_t* data, size_t len)
 }
   ssize_t recv(uint8_t* data, size_t len)
   {
-    FD_ZERO(&rSet_);
-    FD_SET(fd_, &rSet_);
-    ssize_t recv_len = 0;
-
-    switch (select(fd_ + 1, &rSet_, NULL, NULL, &timeout_))
-    {
-    case -1: // error
-      // std::cout << "communication error" << std::endl;
-      break;
-    case 0: // timeout
-      // std::cout << "timeout" << std::endl;
-      break;
-    default:
-      recv_len = ::read(fd_, data, len);
-      break;
-    }
-
-    return recv_len;
+    if (fd_ < 0) { usleep(1000); return 0; }
+    // VMIN=1/VTIME=1 已在 Init 设置:read 阻塞到至少 1 字节或 100ms 超时。
+    // 有数据时立即返回(延迟<1ms),无数据时最多等 100ms(便于 stopped_ 检查退出)。
+    // 相比 select(2ms) 轮询,唤醒频率从 500Hz 降到 10Hz,大幅降低 RT 调度开销。
+    return ::read(fd_, data, len);
   }
 ssize_t recv(uint8_t* data, uint8_t head, ssize_t len)
 {
@@ -173,8 +162,11 @@ private:
     fd_ = open(port.c_str(), O_RDWR | O_NOCTTY);
     if (fd_ < 0)
     {
-      printf("Open serial port %s failed\n", port.c_str());
-      exit(-1);
+      // 不在这里 exit():在 ROS/DDS 线程已启动后走 exit 会触发静态析构
+      // 竞态导致 SEGV,掩盖真实原因。仅标记未打开,由上层(MotorManager)
+      // 统一检测并干净退出。
+      fprintf(stderr, "[SerialPort] 打开串口 %s 失败: %s\n", port.c_str(), strerror(errno));
+      return;
     }
 
     // Set attributes
@@ -195,15 +187,15 @@ private:
     option.c_iflag &= ~INPCK; // no parity
     option.c_cflag &= ~CSTOPB; // 1 stop bit
 
-    option.c_cc[VTIME] = 0;
-    option.c_cc[VMIN] = 0;
+    option.c_cc[VTIME] = 1;  // 阻塞读超时:1×100ms=100ms(仅无数据时生效,有数据立即返回)
+    option.c_cc[VMIN] = 1;   // 至少读到 1 字节才返回;配合 VTIME 实现"有数据即唤醒,无数据最多等 100ms"
     option.c_lflag |= CBAUDEX;
 
     ret = tcflush(fd_, TCIFLUSH);
     ret = tcsetattr(fd_, TCSANOW, &option);
   }
 
-  int fd_;
+  int fd_ = -1;
   fd_set rSet_;
   timeval timeout_;
   std::atomic<bool> stopped_;  // 停止标志

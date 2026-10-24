@@ -4,20 +4,28 @@
  */
 
 #include "rl_sdk.hpp"
+#include <numeric>  // std::accumulate
 
 void RL::StateController(const RobotState<float>* state, RobotCommand<float>* command)
 {
-    auto updateState = [&](std::shared_ptr<FSMState> statePtr)
+    // fsm_state/fsm_command 只是固定地址的透传指针:入参不变(实际永不变)时
+    // 跳过对全部 FSM 状态的 dynamic_pointer_cast 遍历,省去每周期多次类型识别
+    if (state != this->last_ctrl_state_ || command != this->last_ctrl_cmd_)
     {
-        if (auto rl_fsm_state = std::dynamic_pointer_cast<RLFSMState>(statePtr))
+        auto updateState = [&](std::shared_ptr<FSMState> statePtr)
         {
-            rl_fsm_state->fsm_state = state;
-            rl_fsm_state->fsm_command = command;
+            if (auto rl_fsm_state = std::dynamic_pointer_cast<RLFSMState>(statePtr))
+            {
+                rl_fsm_state->fsm_state = state;
+                rl_fsm_state->fsm_command = command;
+            }
+        };
+        for (auto& pair : fsm.states_)
+        {
+            updateState(pair.second);
         }
-    };
-    for (auto& pair : fsm.states_)
-    {
-        updateState(pair.second);
+        this->last_ctrl_state_ = state;
+        this->last_ctrl_cmd_ = command;
     }
 
     fsm.Run();
@@ -205,6 +213,34 @@ void RL::InitOutputs()
     this->output_dof_pos = this->params.Get<std::vector<float>>("default_dof_pos");
     this->output_dof_vel.clear();
     this->output_dof_vel.resize(num_of_dofs, 0.0f);
+
+    // 无锁三缓冲动作通道: 三个槽在启动时按关节数预分配, 运行期零堆分配。
+    RLActionFrame init_frame;
+    init_frame.pos = this->output_dof_pos;
+    init_frame.vel.assign(num_of_dofs, 0.0f);
+    init_frame.tau.assign(num_of_dofs, 0.0f);
+    this->action_buf = std::make_unique<SPSCTripleBuffer<RLActionFrame>>(init_frame);
+    this->action_watchdog_armed = false;
+    this->action_watchdog_tripped = false;
+}
+
+// 推理线程发布最新一帧动作。vector 等长赋值, 不触发重分配。
+void RL::PublishAction()
+{
+    if (!this->action_buf) return;
+    RLActionFrame& slot = this->action_buf->Write();
+    if (!this->output_dof_pos.empty()) slot.pos = this->output_dof_pos;
+    if (!this->output_dof_vel.empty()) slot.vel = this->output_dof_vel;
+    if (!this->output_dof_tau.empty()) slot.tau = this->output_dof_tau;
+    this->action_buf->Commit();
+}
+
+// 进入 locomotion 时调用: 复位看门狗计时并武装。
+void RL::ArmActionWatchdog()
+{
+    this->last_action_time_ = std::chrono::steady_clock::now();
+    this->action_watchdog_armed = true;
+    this->action_watchdog_tripped = false;
 }
 
 void RL::InitControl()
@@ -250,6 +286,24 @@ void RL::InitRL(std::string robot_config_path)
     if (!this->model)
     {
         throw std::runtime_error("Failed to load model from: " + model_path);
+    }
+
+    // ── 推理预热:首次 ONNX forward 会触发算子编译/内存分配,比稳态慢 5-10×。
+    // 在 InitRL 阶段跑 1 次 dummy forward,避免进入 RL 后首帧推理超时触发动作看门狗。
+    {
+        const int obs_dim = std::accumulate(this->obs_dims.begin(), this->obs_dims.end(), 0);
+        const bool use_history = !observations_history.empty();
+        const int history_len = use_history
+            ? *std::max_element(observations_history.begin(), observations_history.end()) + 1
+            : 1;
+        const int input_dim = obs_dim * history_len;
+        std::vector<float> dummy(input_dim, 0.0f);
+        try {
+            this->model->forward({dummy});
+        } catch (const std::exception& e) {
+            // 预热失败不阻塞启动:首帧可能慢但不致命
+            std::cerr << "[rl_sdk] model warmup forward failed (non-fatal): " << e.what() << std::endl;
+        }
     }
 }
 
@@ -588,22 +642,65 @@ bool RLFSMState::Interpolate(
 
 void RLFSMState::RLControl()
 {
-    std::vector<float> _output_dof_pos, _output_dof_vel;
-    if (rl.output_dof_pos_queue.try_pop(_output_dof_pos) && rl.output_dof_vel_queue.try_pop(_output_dof_vel))
+    if (!rl.action_buf) return;
+
+    // 取推理线程发布的最新一帧。无锁、不阻塞: 有新帧则原子切换,
+    // 无新帧时 Refresh()=false, 沿用 Read() 中的上一帧动作。
+    bool fresh = rl.action_buf->Refresh();
+    if (fresh)
     {
-        for (int i = 0; i < rl.params.Get<int>("num_of_dofs"); ++i)
+        rl.last_action_time_ = std::chrono::steady_clock::now();
+    }
+
+    int num_dofs = rl.params.Get<int>("num_of_dofs");
+
+    // 动作看门狗: locomotion 态下推理线程卡死(超过 100ms 无新帧)时,
+    // 本周期全部关节零力矩卸力、速度清零并请求切 passive,
+    // 防止冻结在 locomotion 持续执行陈旧动作导致失控(轮子疯转)。
+    if (rl.action_watchdog_armed)
+    {
+        double stale_sec = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - rl.last_action_time_).count();
+        if (stale_sec > rl.kActionStaleTimeoutSec)
         {
-            if (!_output_dof_pos.empty())
+            if (!rl.action_watchdog_tripped)
             {
-                fsm_command->motor_command.q[i] = _output_dof_pos[i];
+                rl.action_watchdog_tripped = true;
+                std::cout << LOGGER::ERROR << "RL action watchdog tripped: no new action for "
+                          << stale_sec * 1000.0 << "ms, forcing passive (zero torque)" << std::endl;
+                rl.Notify("error", "action watchdog tripped: inference stalled, force passive");
             }
-            if (!_output_dof_vel.empty())
+            for (int i = 0; i < num_dofs; ++i)
             {
-                fsm_command->motor_command.dq[i] = _output_dof_vel[i];
+                fsm_command->motor_command.q[i] = 0.0f;
+                fsm_command->motor_command.dq[i] = 0.0f;
+                fsm_command->motor_command.tau[i] = 0.0f;
+                fsm_command->motor_command.kp[i] = 0.0f;
+                fsm_command->motor_command.kd[i] = 0.0f;
             }
-            fsm_command->motor_command.kp[i] = rl.params.Get<std::vector<float>>("rl_kp")[i];
-            fsm_command->motor_command.kd[i] = rl.params.Get<std::vector<float>>("rl_kd")[i];
-            fsm_command->motor_command.tau[i] = 0;
+            rl.control.x = rl.control.y = rl.control.yaw = 0.0f;
+            rl.fsm.RequestStateChange("RLFSMStatePassive");
+            return;
         }
+    }
+
+    const RLActionFrame& frame = rl.action_buf->Read();
+    // kp/kd 只随模型变化:循环外取一次,避免每周期 2*num_dofs 次 YAML 节点
+    // 查找 + vector 拷贝(约 32 次/周期的堆分配,抬高 loop_control 基线抖动)
+    const std::vector<float> rl_kp = rl.params.Get<std::vector<float>>("rl_kp");
+    const std::vector<float> rl_kd = rl.params.Get<std::vector<float>>("rl_kd");
+    for (int i = 0; i < num_dofs; ++i)
+    {
+        if (!frame.pos.empty())
+        {
+            fsm_command->motor_command.q[i] = frame.pos[i];
+        }
+        if (!frame.vel.empty())
+        {
+            fsm_command->motor_command.dq[i] = frame.vel[i];
+        }
+        fsm_command->motor_command.kp[i] = rl_kp[i];
+        fsm_command->motor_command.kd[i] = rl_kd[i];
+        fsm_command->motor_command.tau[i] = 0;
     }
 }

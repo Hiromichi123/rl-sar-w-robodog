@@ -1,6 +1,17 @@
 JXGw:
   dt: 0.005
   decimation: 4
+  can_transport: socketcan
+  # Model-derived geometry; verify suspended before ground operation.
+  diff_radius: 0.108
+  diff_track: 0.5685
+  diff_wheel_signs: [1.0, 1.0, 1.0, 1.0]
+  diff_max_linear: 0.45
+  diff_max_angular: 0.60
+  diff_max_wheel: 4.5
+  diff_wheel_acceleration: 3.0
+  diff_timeout: 0.5
+  diff_wheel_kd: 0.5
   fixed_kp: [160.0, 160.0, 160.0, 0.0,
              160.0, 160.0, 160.0, 0.0,
              160.0, 160.0, 160.0, 0.0,

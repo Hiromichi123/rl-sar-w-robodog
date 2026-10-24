@@ -11,36 +11,29 @@
  * 不直接持有 Three.js 场景对象,所有场景/渲染器/DOM 引用均从各子模块导入。
  */
 import * as THREE from 'three';
+import { installDiffDriveUi } from './diff-drive-ui.js?v=2026102001';
 import { canvas, renderer, labelRenderer, scene, camera, orbit, defaultView, setView, status, controlsElement } from './scene.js?v=2';
 import {
   jointStates, visibleControls, cartesianArms, shared,
   clearAllModelState, MODEL_REGISTRY, currentModelId,
 } from './state.js?v=1';
 import { stopActiveStepperMotion, setJointPose, syncStateInputs } from './joints.js?v=1';
-import { loadModel, nextLoadGeneration, updateWheelSpokeSides } from './model.js?v=987';
+import { loadModel, nextLoadGeneration, updateWheelSpokeSides } from './model.js?v=989';
 import { setAnnotationsVisible, updateJointAnnotations, clearStaticAnnotations } from './annotations.js?v=949';
 import { setComVisible, updateComViz } from './com-viz.js?v=3';
-import { rebuildDashboard, updateDashboard } from './dashboard.js?v=970';
-import { setChassisCommand, pushJoystickCommand, applyJoystickLift, getJoystickLift, scheduleArmSolve, syncArmTarget, enforceGroundContact, getQuadChassisController, getJoystickMaxLinear, setJoystickMaxLinear, getJoystickMaxAngular, setJoystickMaxAngular, JOY_SPEED_MAX, setupQuadrupedChassisControl } from './cartesian.js?v=1018';
+import { rebuildDashboard, updateDashboard } from './dashboard.js?v=2026102001';
+import { setChassisCommand, pushJoystickCommand, applyJoystickLift, getJoystickLift, scheduleArmSolve, syncArmTarget, enforceGroundContact, getQuadChassisController, getJoystickMaxLinear, setJoystickMaxLinear, getJoystickMaxAngular, setJoystickMaxAngular, JOY_SPEED_MAX, setupQuadrupedChassisControl, setCruiseLockLeft, setCruiseLockRight } from './cartesian.js?v=1025';
 import {
   addStatusListener, setPositionSource, toggleConnection, setRosUrl, getRosUrl,
   addMessageListener, addImuListener, addNotifyListener, publishNotifyAck,
   addCheckStandListener, addCommandFeedbackListener, publishCheckStand,
-  addBriefingStatusListener, publishBriefing,
+  addPostureListener, addCheckStandingListener,
   lastImuMessageAt, imuMessageCount,
   publishBehaviorCommand, setCmdVelRequest, setCmdVelVz, stopCmdVel,
+  setCmdVelAxesEnabled, getCmdVelAxesEnabled, getCmdVelRequest,
   MOTOR_STATE_TOPIC, IMU_STATE_TOPIC, getStatusSnapshot,
-  injectMotorFrame, injectImuFrame, motorTelemetry, JOINT_MAPPING,
-} from './ros-bridge.js?v=982';
-import {
-  openRecorderDB, startRecording, stopRecording, recordFrame, isRecording,
-  listRecordings, renameRecording, deleteRecording, getRecording,
-} from './recorder-storage.js?v=967';
-import {
-  startReplay, stopReplay, addReplayListener, isReplaying, getReplayState,
-  seekTo as replaySeekTo, seekAndInject, hasFrames, clearFrames, getCurrentSeekMs,
-  loadFramesForPreview,
-} from './recorder-replay.js?v=969';
+  motorTelemetry, JOINT_MAPPING,
+} from './ros-bridge.js?v=2026102001';
 import {
   recordSample, renderCurves, rebuildCurveList, clearAllBuffers,
   setPaused as setCurvesPaused,
@@ -49,28 +42,53 @@ import {
   setImuDisplayMode, getImuDisplayMode,
   recordJoystickSample, renderJoystickCurves, rebuildJoystickCurveList, clearAllJoyBuffers,
   getCurvesHistoryOffset, setCurvesHistoryOffset, resetCurvesHistory, getCurvesMaxHistorySec,
-} from './curves.js?v=982';
-import { initRosDebug, onRosDebugTabShown } from './ros-debug.js?v=976';
-import { initAlarm, evaluateAlarms, clearAlarmMarkers, rebuildAlarmEditor, purgeAlarmRecordMeta } from './alarm.js?v=972';
-import { initCameraView, setCameraViewVisible } from './camera-view.js?v=5';
-import { initLidarView, setLidarViewVisible } from './lidar-view.js?v=4';
+} from './curves.js?v=2026102001';
+import { initRosDebug, onRosDebugTabShown } from './ros-debug.js?v=2026102001';
+import { initAlarm, evaluateAlarms, clearAlarmMarkers, rebuildAlarmEditor } from './alarm.js?v=2026102001';
+import { initCameraView, setCameraViewVisible } from './camera-view.js?v=2026102001';
+import { initLidarView, setLidarViewVisible } from './lidar-view.js?v=2026102001';
+import { initLogView, setLogViewVisible } from './logview.js?v=2026102001';
+import { initSysAdmin, setTerminalVisible, setFilesVisible, setSystemVisible, setSyslogVisible, setModelsVisible, setServicesVisible, setProcessesVisible, setNetVisible, setDevVisible, setRcVisible, setAboutVisible } from './sysadmin.js?v=2026102102';
+import { initBattery, setBatteryVisible } from './battery.js?v=2026102001';
 
-/** 当前激活的控制面板标签:桌面默认「话题调试」;移动端精简为
- *  移动控制/ROS 指令/数据看板/仿真四个页签,默认「移动控制」。刷新后恢复上次选择 */
+// 全局 401 拦截:会话 Cookie 过期/服务端更换令牌时,任何 fetch 收到 401
+// 都统一回到登录页(文档级导航本身也会被后端 302,这里覆盖接口层失效)
+const _origFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const resp = await _origFetch(...args);
+  if (resp.status === 401) {
+    window.location.replace('./login.html');
+    return new Promise(() => {});  // 挂起,阻止业务代码继续处理该响应
+  }
+  return resp;
+};
+
+/** 当前激活的控制面板标签:桌面端与移动端统一精简为
+ *  移动控制/ROS 指令/置零/数据看板,默认「移动控制」。
+ *  刷新后恢复上次选择;旧版本遗留的页签名(rosdebug/curves 等)回退默认。 */
 const CONTROL_TAB_STORAGE_KEY = 'web_sim_control_tab_v1';
-const VALID_CONTROL_TABS = ['rosdebug', 'alarm', 'config', 'movement', 'joint', 'cartesian', 'curves', 'dashboard', 'camera', 'lidar', 'zero'];
-const MOBILE_CONTROL_TABS = ['movement', 'ros', 'zero', 'dashboard', 'sim'];
+
+// 一级分组 ↔ 二级 tab 映射（PC 端两级导航）
+const TAB_GROUPS_MAP = {
+  control: ['movement', 'ros', 'joint', 'dashboard', 'rc', 'models'],
+  system:  ['terminal', 'system', 'syslog', 'services', 'processes', 'net', 'dev', 'files', 'logs', 'battery', 'about'],
+};
+const TAB_TO_GROUP = Object.fromEntries(
+  Object.entries(TAB_GROUPS_MAP).flatMap(([g, tabs]) => tabs.map((t) => [t, g]))
+);
+const DESKTOP_CONTROL_TABS = ['movement', 'ros', 'joint', 'dashboard', 'logs', 'terminal', 'system', 'models', 'files', 'rc', 'battery'];
+const MOBILE_CONTROL_TABS = ['movement', 'sim', 'ros', 'joint', 'dashboard', 'models', 'rc', 'battery'];
 function loadPersistedControlTab() {
   try {
-    const saved = localStorage.getItem(CONTROL_TAB_STORAGE_KEY);
+    let saved = localStorage.getItem(CONTROL_TAB_STORAGE_KEY);
+    // 旧版「系统管理」页签拆分为「终端」+「文件」, 历史选择迁移到终端
+    if (saved === 'system') saved = 'terminal';
     if (window.__WEB_MOBILE__) {
-      // 移动端:仅接受四个精简页签;桌面端遗留的其它页签(如 rosdebug)回退到移动控制
       return MOBILE_CONTROL_TABS.includes(saved) ? saved : 'movement';
     }
-    // 桌面端不识别 sim(移动端独占),脏数据回退默认
-    return VALID_CONTROL_TABS.includes(saved) ? saved : 'rosdebug';
+    return DESKTOP_CONTROL_TABS.includes(saved) ? saved : 'movement';
   } catch {
-    return window.__WEB_MOBILE__ ? 'movement' : 'rosdebug'; // 隐私模式等 localStorage 不可用时回退默认
+    return 'movement'; // 隐私模式等 localStorage 不可用时回退默认
   }
 }
 let activeControlTab = loadPersistedControlTab();
@@ -78,7 +96,7 @@ let activeControlTab = loadPersistedControlTab();
 // ════════════════════════════════════════════════════════
 // 3D 仿真画布开关(默认关闭)
 // 关闭时:不加载模型网格(~40MB OBJ)、不创建渲染帧;ROS 连接、数据看板、
-// 曲线、录制、真机遥控(摇杆/键盘 → cmd_vel)均独立可用。
+// 曲线、真机遥控(摇杆/键盘 → cmd_vel)均独立可用。
 // 再次开启时模型仍在内存(关闭只暂停渲染),秒恢复;选择持久化到 localStorage。
 // ════════════════════════════════════════════════════════
 const SIM_ENABLED_KEY = 'web_sim_enabled_v1';
@@ -132,7 +150,7 @@ async function enableSim() {
       resize();                 // canvas 从 display:none 恢复后需重新计算尺寸
       setControlTab(activeControlTab);
       // 若 ROS 已在线,关节滑块应切为禁用(真机接管)
-      import('./ros-bridge.js?v=982').then((m) => refreshSliderDisabledState(!!m.rosControlActive)).catch(() => {});
+      import('./ros-bridge.js?v=2026102001').then((m) => refreshSliderDisabledState(!!m.rosControlActive)).catch(() => {});
     }
   } catch (error) {
     console.error(error);
@@ -182,7 +200,17 @@ function _ensureUiFeedbackDom() {
 .ui-modal-actions button{min-height:34px;padding:0 16px;border-radius:7px;font-size:13px;cursor:pointer;touch-action:manipulation}
 .ui-modal-cancel{background:transparent;border:1px solid var(--c-input-border,#2c3a55);color:var(--c-label,#c6d2e4)}
 .ui-modal-ok{background:var(--c-accent,#4dd0c1);border:1px solid var(--c-accent,#4dd0c1);color:#0d2326;font-weight:700}
-.ui-modal-danger{background:#e07070;border-color:#e07070;color:#fff}`;
+.ui-modal-danger{background:#e07070;border-color:#e07070;color:#fff}
+.ui-modal-input{width:100%;box-sizing:border-box;margin:0 0 16px;padding:8px 10px;border-radius:7px;border:1px solid var(--c-input-border,#2c3a55);background:#0c1422;color:#eef3fa;font-size:13px;font-family:inherit}
+.ui-modal-input:focus{outline:none;border-color:var(--c-accent,#4dd0c1)}
+.ui-modal-lg{width:min(92vw,560px)}
+.ui-modal-textarea{width:100%;box-sizing:border-box;min-height:220px;margin:0 0 16px;padding:9px 11px;border-radius:7px;border:1px solid var(--c-input-border,#2c3a55);background:#0c1422;color:#eef3fa;font-size:12.5px;font-family:ui-monospace,Menlo,Consolas,monospace;line-height:1.55;resize:vertical;tab-size:2}
+.ui-modal-textarea:focus{outline:none;border-color:var(--c-accent,#4dd0c1);box-shadow:0 0 0 3px rgba(77,208,193,.15)}
+.ui-modal-textarea::placeholder{color:#5f6f89}
+.ui-modal-textarea-note{min-height:120px;font-family:inherit;font-size:13px;line-height:1.6;padding:10px 12px}
+.ui-modal-hint{font-size:11px;color:#5f6f89;margin:-8px 0 14px}
+.ui-modal-log-screen{width:100%;box-sizing:border-box;max-height:60vh;overflow-y:auto;margin:0 0 16px;padding:9px 11px;border-radius:7px;border:1px solid var(--c-input-border,#2c3a55);background:#0d1117;color:#c9d4e0;font-size:11.5px;font-family:ui-monospace,Menlo,Consolas,monospace;line-height:1.5;white-space:pre-wrap;word-break:break-anywhere}
+.ui-modal-msg:empty{display:none}`;
   document.head.appendChild(style);
   const wrap = document.createElement('div');
   wrap.id = 'ui-toast-wrap';
@@ -203,6 +231,12 @@ function showToast(message, type = 'info') {
     window.setTimeout(() => el.remove(), 200);
   }, 2400);
 }
+
+// 跨模块 toast 通道:battery.js 等独立模块派发 window 事件请求轻提示(避免循环 import)
+window.addEventListener('app-toast', (e) => {
+  const d = (e && e.detail) || {};
+  if (d.message) showToast(d.message, d.type === 'warn' ? 'warn' : 'info');
+});
 
 /**
  * 自定义确认对话框,返回 Promise<boolean>(true=确认)。
@@ -253,6 +287,101 @@ function confirmDialog({ title = '请确认', message = '', confirmText = '确�
     });
   });
 }
+
+/**
+ * 自定义信息对话框(仅"确定"按钮),返回 Promise<void>。
+ * 用于替代 window.alert。
+ */
+function alertDialog({ title = '提示', message = '' } = {}) {
+  _ensureUiFeedbackDom();
+  return new Promise((resolve) => {
+    const mask = document.createElement('div');
+    mask.className = 'ui-modal-mask';
+    mask.innerHTML = `
+      <div class="ui-modal" role="alertdialog" aria-modal="true">
+        <h3 class="ui-modal-title"></h3>
+        <p class="ui-modal-msg"></p>
+        <div class="ui-modal-actions">
+          <button type="button" class="ui-modal-ok"></button>
+        </div>
+      </div>`;
+    mask.querySelector('.ui-modal-title').textContent = title;
+    mask.querySelector('.ui-modal-msg').textContent = message;
+    const okBtn = mask.querySelector('.ui-modal-ok');
+    okBtn.textContent = '确定';
+    document.body.appendChild(mask);
+    let settled = false;
+    const close = () => {
+      if (settled) return;
+      settled = true;
+      mask.classList.remove('ui-modal-show');
+      window.setTimeout(() => mask.remove(), 150);
+      resolve();
+    };
+    mask.querySelector('.ui-modal-ok').addEventListener('click', close);
+    requestAnimationFrame(() => {
+      mask.classList.add('ui-modal-show');
+      okBtn.focus();
+    });
+  });
+}
+
+/**
+ * 自定义输入对话框,返回 Promise<string|null>(null=取消)。
+ * 用于替代 window.prompt。
+ * @param {{title?:string, message?:string, defaultValue?:string, placeholder?:string}} opts
+ */
+function promptDialog({ title = '请输入', message = '', defaultValue = '', placeholder = '' } = {}) {
+  _ensureUiFeedbackDom();
+  return new Promise((resolve) => {
+    const mask = document.createElement('div');
+    mask.className = 'ui-modal-mask';
+    mask.innerHTML = `
+      <div class="ui-modal" role="dialog" aria-modal="true">
+        <h3 class="ui-modal-title"></h3>
+        <p class="ui-modal-msg"></p>
+        <input type="text" class="ui-modal-input" spellcheck="false" autocomplete="off" />
+        <div class="ui-modal-actions">
+          <button type="button" class="ui-modal-cancel">取消</button>
+          <button type="button" class="ui-modal-ok">确定</button>
+        </div>
+      </div>`;
+    mask.querySelector('.ui-modal-title').textContent = title;
+    mask.querySelector('.ui-modal-msg').textContent = message;
+    const input = mask.querySelector('.ui-modal-input');
+    input.value = defaultValue;
+    input.placeholder = placeholder;
+    const okBtn = mask.querySelector('.ui-modal-ok');
+    document.body.appendChild(mask);
+    let settled = false;
+    const close = (val) => {
+      if (settled) return;
+      settled = true;
+      mask.classList.remove('ui-modal-show');
+      window.setTimeout(() => mask.remove(), 150);
+      resolve(val);
+    };
+    const submit = () => close(input.value);
+    mask.querySelector('.ui-modal-cancel').addEventListener('click', () => close(null));
+    okBtn.addEventListener('click', submit);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); submit(); }
+      else if (e.key === 'Escape') close(null);
+    });
+    mask.addEventListener('click', (e) => { if (e.target === mask) close(null); });
+    requestAnimationFrame(() => {
+      mask.classList.add('ui-modal-show');
+      input.focus();
+      input.select();
+    });
+  });
+}
+
+// 暴露到 window,供 sysadmin.js 等子模块复用(避免循环 import)
+window.confirmDialog = confirmDialog;
+window.alertDialog = alertDialog;
+window.promptDialog = promptDialog;
+window.ensureUiFeedbackDom = _ensureUiFeedbackDom;
 
 /** 上次报警评估时间戳(动画循环节流) */
 let _lastAlarmEvalAt = 0;
@@ -324,58 +453,25 @@ function _updateNotifyBadge() {
   }
 }
 
-// 通知监听器:必须在模块顶层注册,不能放在 async initRecorderAndReplay() 内部,
-// 否则 IndexedDB 初始化耗时期间通知可能已到达但 listener 尚未注册。
+// 通知监听器:模块顶层注册,确保页面加载后即可接收通知。
 addNotifyListener((payload) => {
   _notifyHistory.push({ ...payload });
   if (_notifyHistory.length > NOTIFY_HISTORY_MAX) _notifyHistory.shift();
   _notifyUnreadCount++;
   _updateNotifyBadge();
   _renderNotifyPanel();
-  const toastType = (payload.type === 'error' || payload.type === 'warning') ? 'warn' : 'info';
-  const prefix = _notifyTypeIcon(payload.type);
-  showToast(`${prefix} ${payload.content}`, toastType);
+  // probe 类型消息不弹 toast(由探针页签卡片展示);
+  // safe_getup 为后端编排进度帧(start/step/done),由摇杆区步骤芯片展示,
+  // 成功/失败另有 success/error 类型中文通知,这里不逐帧弹英文 toast
+  if (payload.type !== 'probe' && payload.type !== 'safe_getup') {
+    const toastType = (payload.type === 'error' || payload.type === 'warning') ? 'warn' : 'info';
+    const prefix = _notifyTypeIcon(payload.type);
+    showToast(`${prefix} ${payload.content}`, toastType);
+  }
   if (payload.type === 'error') console.error(`[notify #${payload.id}] ${payload.content}`);
+  // 探针消息分发到页签卡片
+  if (payload.type === 'probe') _handleProbeNotify(payload.content);
 });
-
-// ════════════════════════════════════════════════════════
-// 录制 & 复现:全局状态(必须放在 addStatusListener 之前,避免 TDZ 报错)
-// ════════════════════════════════════════════════════════
-/** 当前正在录制的 recordingId(null = 未在录) */
-let _activeRecordingId = null;
-/** 当前录制开始时刻(Date.now() 基,用于按钮秒数本地计算) */
-let _activeRecordingStartedAt = 0;
-/** 节流:录制状态栏每秒刷一次 */
-let _lastRecStatusRefreshAt = 0;
-/** 1s 刷新一次录制状态 / 列表(新增后重排)/ 复现进度 */
-const REC_STATUS_REFRESH_MS = 1000;
-/** 录制中定时器:每 REC_STATUS_REFRESH_MS 触发 applyRecorderUiState,
- *  让顶部状态栏秒/帧统计实时更新(否则只会在按钮点击时刷新一次,统计永远停在快照) */
-let _recStatusTimer = 0;
-function startRecStatusTimer() {
-  if (_recStatusTimer) return;
-  _recStatusTimer = window.setInterval(() => {
-    if (_activeRecordingId == null) { stopRecStatusTimer(); return; }
-    applyRecorderUiState();
-  }, REC_STATUS_REFRESH_MS);
-}
-function stopRecStatusTimer() {
-  if (_recStatusTimer) { clearInterval(_recStatusTimer); _recStatusTimer = 0; }
-}
-
-/** 把「正在录制 / 正在复现」附加到主 ros-status 胶囊尾部(返回 appended 字符串) */
-function rosStatusAppendExtra() {
-  const parts = [];
-  if (_activeRecordingId != null) {
-    parts.push('● REC');
-  }
-  if (typeof isReplaying === 'function' && isReplaying()) {
-    const rs = getReplayState();
-    const pct = rs.totalDurationMs > 0 ? Math.round(100 * rs.elapsedMs / rs.totalDurationMs) : 0;
-    parts.push(`▶ REPLAY ${pct}%`);
-  }
-  return parts.length ? ' · ' + parts.join(' · ') : '';
-}
 
 // ── 全局步进器中断事件 ───────────────────────────────────
 // 任何可能让用户离开当前交互的场景(松开指针、切到后台、页面失焦),
@@ -448,7 +544,7 @@ export async function switchModel(modelId) {
     }
     // 切模型后控制面板重新渲染,按 ROS 状态重新刷新滑块禁用态
     try {
-      const stateModule = await import('./ros-bridge.js?v=982');
+      const stateModule = await import('./ros-bridge.js?v=2026102001');
       refreshSliderDisabledState(!!stateModule.rosControlActive);
     } catch { /* 忽略 */ }
     // 重新激活当前控制标签,确保底盘控制器被正确启用
@@ -462,6 +558,153 @@ export async function switchModel(modelId) {
   }
 }
 
+// ── 电机探针页签 ─────────────────────────────────────────
+const PROBE_MOTOR_NAMES = [
+  'FL_hip','FL_thigh','FL_calf','FL_wheel',
+  'FR_hip','FR_thigh','FR_calf','FR_wheel',
+  'RL_hip','RL_thigh','RL_calf','RL_wheel',
+  'RR_hip','RR_thigh','RR_calf','RR_wheel'
+];
+let _probeGridBuilt = false;
+
+/** 探针网格已合并到置零矩阵;此函数绑定探针工具栏按钮(首次进入页签时调用) */
+function _buildProbeGrid() {
+  if (_probeGridBuilt) return;
+  // 绑定"探针选中"按钮:对选中的电机逐个执行探针
+  const probeSelectedBtn = document.getElementById('probe-selected-btn');
+  if (probeSelectedBtn && !probeSelectedBtn.dataset.bound) {
+    probeSelectedBtn.dataset.bound = '1';
+    probeSelectedBtn.addEventListener('click', () => {
+      const ids = [...zeroSelectedMotors].sort((a, b) => a - b);
+      if (ids.length === 0) { showToast('请先选择电机', 'warn'); return; }
+      // 标记选中电机为等待中(内存+格子)
+      ids.forEach((id) => {
+        probeResults.set(id, 'waiting');
+        const rec = zeroMotorCells[id];
+        if (rec) {
+          rec.cell.classList.remove('is-probe-ok', 'is-probe-fail');
+          rec.cell.classList.add('is-probe-running');
+          rec.probeStateEl.textContent = '等待中...';
+        }
+      });
+      // 逐个发送 probe_motor 命令(后端串行处理,通过 notify 返回单台结果)
+      ids.forEach((id) => publishBehaviorCommand(`probe_motor m${id}`));
+    });
+  }
+  // 绑定分腿探针按钮
+  document.querySelectorAll('.probe-leg-btn').forEach((btn) => {
+    if (btn.dataset.probeLegBound) return;
+    btn.dataset.probeLegBound = '1';
+    btn.addEventListener('click', () => {
+      const leg = Number(btn.dataset.leg);
+      const legName = ['FL','FR','RL','RR'][leg];
+      // 标记该腿 4 台为等待中(内存+格子)
+      for (let j = 0; j < 4; j++) {
+        const id = leg * 4 + j;
+        probeResults.set(id, 'waiting');
+        const rec = zeroMotorCells[id];
+        if (rec) {
+          rec.cell.classList.remove('is-probe-ok', 'is-probe-fail');
+          rec.cell.classList.add('is-probe-running');
+          rec.probeStateEl.textContent = '等待中...';
+        }
+      }
+      const status = document.getElementById('probe-status');
+      if (status) { status.textContent = `${legName} 腿探针中...`; status.className = 'probe-status is-running'; }
+      publishBehaviorCommand(`probe_leg ${legName}`);
+    });
+  });
+  _probeGridBuilt = true;
+}
+
+/** 单台探针 */
+function _runSingleProbe(id) {
+  const rec = zeroMotorCells[id];
+  if (rec) {
+    rec.cell.classList.remove('is-probe-ok', 'is-probe-fail');
+    rec.cell.classList.add('is-probe-running');
+    rec.probeStateEl.textContent = '探针中...';
+  }
+  publishBehaviorCommand(`probe_motor m${id}`);
+}
+
+/** 处理后端 probe 类型 Notify 消息 */
+function _handleProbeNotify(content) {
+  const parts = content.split(/\s+/);
+  const action = parts[0];
+  // start: 清空全部格子状态(全部探针模式)
+  if (action === 'start') {
+    _buildProbeGrid();
+    for (let i = 0; i < 16; i++) probeResults.set(i, 'waiting');
+    zeroMotorCells.forEach((rec) => {
+      rec.cell.classList.remove('is-probe-ok', 'is-probe-fail');
+      rec.cell.classList.add('is-probe-running');
+      rec.probeStateEl.textContent = '等待中...';
+    });
+    const status = document.getElementById('probe-status');
+    if (status) { status.textContent = '探针进行中...'; status.className = 'probe-status is-running'; }
+    return;
+  }
+  // legstart N: 分腿探针开始,仅标记该腿 4 台为等待中
+  if (action === 'legstart') {
+    _buildProbeGrid();
+    const leg = Number(parts[1]);
+    for (let j = 0; j < 4; j++) {
+      const id = leg * 4 + j;
+      probeResults.set(id, 'waiting');
+      const rec = zeroMotorCells[id];
+      if (rec) {
+        rec.cell.classList.remove('is-probe-ok', 'is-probe-fail');
+        rec.cell.classList.add('is-probe-running');
+        rec.probeStateEl.textContent = '等待中...';
+      }
+    }
+    const status = document.getElementById('probe-status');
+    if (status) { status.textContent = '分腿探针进行中...'; status.className = 'probe-status is-running'; }
+    return;
+  }
+  // legdone N fails: 分腿探针完成
+  if (action === 'legdone') {
+    const status = document.getElementById('probe-status');
+    if (status) { status.textContent = '分腿探针完成'; status.className = 'probe-status is-done'; }
+    return;
+  }
+  // done N: 全部完成
+  if (action === 'done') {
+    const fails = Number(parts[1]) || 0;
+    const status = document.getElementById('probe-status');
+    if (status) {
+      status.textContent = fails === 0 ? '全部可控 ✅' : `${fails} 台无响应`;
+      status.className = 'probe-status is-done';
+    }
+    return;
+  }
+  // result m0 FL_hip ok/fail: 单台结果(全部探针模式)
+  // single m0 FL_hip start/ok/fail: 单台探针模式
+  if (action === 'result' || action === 'single') {
+    const idStr = parts[1] || '';
+    const id = Number(idStr.replace(/^m/, ''));
+    const state = parts[3]; // start / ok / fail
+    // 更新内存探针状态
+    if (state === 'ok') probeResults.set(id, 'ok');
+    else if (state === 'fail') probeResults.set(id, 'fail');
+    else if (state === 'start') probeResults.set(id, 'running');
+    const rec = zeroMotorCells[id];
+    if (!rec) return;
+    rec.cell.classList.remove('is-probe-ok', 'is-probe-fail', 'is-probe-running');
+    if (state === 'start') {
+      rec.cell.classList.add('is-probe-running');
+      rec.probeStateEl.textContent = '探针中...';
+    } else if (state === 'ok') {
+      rec.cell.classList.add('is-probe-ok');
+      rec.probeStateEl.textContent = '可控 ✅';
+    } else if (state === 'fail') {
+      rec.cell.classList.add('is-probe-fail');
+      rec.probeStateEl.textContent = '无响应 ❌';
+    }
+  }
+}
+
 // ── 面板切换 ─────────────────────────────────────────────
 
 /**
@@ -471,27 +714,52 @@ function setControlTab(tab) {
   activeControlTab = tab;
   // 持久化页签选择:刷新/重开后恢复(隐私模式等写入失败时静默忽略)
   try { localStorage.setItem(CONTROL_TAB_STORAGE_KEY, tab); } catch { /* 忽略 */ }
+  // 一级分组高亮 & 二级 tabs 容器显隐
+  const __grp = TAB_TO_GROUP[tab] || null;
+  if (__grp) {
+    document.querySelectorAll('[data-tab-group]').forEach((b) => {
+      const on = b.dataset.tabGroup === __grp;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', String(on));
+    });
+    document.querySelectorAll('.control-tabs[data-group-tabs]').forEach((wrap) => {
+      wrap.hidden = wrap.dataset.groupTabs !== __grp;
+    });
+  }
   document.querySelectorAll('[data-control-tab]').forEach((button) => {
     const active = button.dataset.controlTab === tab;
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', String(active));
   });
-  document.querySelector('#config-control-view').hidden   = tab !== 'config';
-  document.querySelector('#joint-control-view').hidden    = tab !== 'joint';
-  document.querySelector('#movement-control-view').hidden = tab !== 'movement';
-  document.querySelector('#cartesian-control-view').hidden= tab !== 'cartesian';
-  document.querySelector('#curves-control-view').hidden   = tab !== 'curves';
-  document.querySelector('#dashboard-control-view').hidden = tab !== 'dashboard';
-  document.querySelector('#camera-control-view').hidden = tab !== 'camera';
-  document.querySelector('#lidar-control-view').hidden = tab !== 'lidar';
-  document.querySelector('#rosdebug-control-view').hidden = tab !== 'rosdebug';
-  document.querySelector('#alarm-control-view').hidden    = tab !== 'alarm';
-  document.querySelector('#zero-control-view').hidden     = tab !== 'zero';
+  // 各页签显隐:用可选链避免移动端缺少部分 view 时抛错中断切换
+  const q = (sel) => document.querySelector(sel);
+  const jointEl = q('#joint-control-view'); if (jointEl) jointEl.hidden = tab !== 'joint';
+  const mvEl = q('#movement-control-view'); if (mvEl) mvEl.hidden = tab !== 'movement';
+  const cartEl = q('#cartesian-control-view'); if (cartEl) cartEl.hidden = tab !== 'cartesian';
+  const curvesEl = q('#curves-control-view'); if (curvesEl) curvesEl.hidden = tab !== 'curves';
+  const dashEl = q('#dashboard-control-view'); if (dashEl) dashEl.hidden = tab !== 'dashboard';
+  const camEl = q('#camera-control-view'); if (camEl) camEl.hidden = tab !== 'camera';
+  const lidarEl = q('#lidar-control-view'); if (lidarEl) lidarEl.hidden = tab !== 'lidar';
+  const rosdbgEl = q('#rosdebug-control-view'); if (rosdbgEl) rosdbgEl.hidden = tab !== 'rosdebug';
+  const alarmEl = q('#alarm-control-view'); if (alarmEl) alarmEl.hidden = tab !== 'alarm';
+  const logsEl = q('#logs-control-view'); if (logsEl) logsEl.hidden = tab !== 'logs';
+  const termEl = q('#terminal-control-view'); if (termEl) termEl.hidden = tab !== 'terminal';
+  const sysEl = q('#system-control-view'); if (sysEl) sysEl.hidden = tab !== 'system';
+  const syslogEl = q('#syslog-control-view'); if (syslogEl) syslogEl.hidden = tab !== 'syslog';
+  const svcEl = q('#services-control-view'); if (svcEl) svcEl.hidden = tab !== 'services';
+  const psEl = q('#processes-control-view'); if (psEl) psEl.hidden = tab !== 'processes';
+  const netEl = q('#net-control-view'); if (netEl) netEl.hidden = tab !== 'net';
+  const devEl = q('#dev-control-view'); if (devEl) devEl.hidden = tab !== 'dev';
+  const modEl = q('#models-control-view'); if (modEl) modEl.hidden = tab !== 'models';
+  const filesEl = q('#files-control-view'); if (filesEl) filesEl.hidden = tab !== 'files';
+  const rcEl = q('#rc-control-view'); if (rcEl) rcEl.hidden = tab !== 'rc';
+  const batEl = q('#battery-control-view'); if (batEl) batEl.hidden = tab !== 'battery';
+  const aboutEl = q('#about-control-view'); if (aboutEl) aboutEl.hidden = tab !== 'about';
   // 移动端独占的仿真页签容器(桌面 HTML 无此节点,可选链跳过)
-  const simViewEl = document.querySelector('#sim-control-view');
+  const simViewEl = q('#sim-control-view');
   if (simViewEl) simViewEl.hidden = tab !== 'sim';
   // 移动端独占的 ROS 指令页签容器
-  const rosViewEl = document.querySelector('#ros-control-view');
+  const rosViewEl = q('#ros-control-view');
   if (rosViewEl) rosViewEl.hidden = tab !== 'ros';
 
   // 切换页签后把面板滚动位置归零:新页签内容可能比上一个短,
@@ -510,6 +778,9 @@ function setControlTab(tab) {
 
     // 切到数据看板页签时重建行/芯片(适配当前模型的关节列表)并立即刷一帧
     if (tab === 'dashboard') rebuildDashboard();
+
+    // 切到关节管理页签时构建探针卡片网格(仅首次)
+    if (tab === 'joint') _buildProbeGrid();
 
     // 可视化面板显示时重建 DOM 行(适配模型切换后的关节数 + IMU 15 条量固定 + 摇杆 5 条固定),并立即刷一帧
     if (tab === 'curves') {
@@ -532,6 +803,32 @@ function setControlTab(tab) {
   try { setCameraViewVisible(tab === 'camera'); } catch { /* 忽略 */ }
   // 雷达页签同理:可见时订阅点云(节流10Hz)+内置 IMU(20Hz)
   try { setLidarViewVisible(tab === 'lidar'); } catch { /* 忽略 */ }
+  // 实时日志页签:可见时订阅 journalctl -f,切走退订
+  try { setLogViewVisible(tab === 'logs'); } catch { /* 忽略 */ }
+  // 终端页签:终端 PTY 随页签可见性保活
+  try { setTerminalVisible(tab === 'terminal'); } catch { /* 忽略 */ }
+  // 系统页签:服务状态轮询/HR 日志状态随页签可见性开关
+  try { setSystemVisible(tab === 'system'); } catch { /* 忽略 */ }
+  // 系统日志页签
+  try { setSyslogVisible(tab === 'syslog'); } catch { /* 忽略 */ }
+  // 服务管理页签
+  try { setServicesVisible(tab === 'services'); } catch { /* 忽略 */ }
+  // 进程管理页签
+  try { setProcessesVisible(tab === 'processes'); } catch { /* 忽略 */ }
+  // 网络管理页签(ip addr)
+  try { setNetVisible(tab === 'net'); } catch { /* 忽略 */ }
+  // 设备管理页签(/dev)
+  try { setDevVisible(tab === 'dev'); } catch { /* 忽略 */ }
+  // 模型页签: 进入时刷新模型列表
+  try { setModelsVisible(tab === 'models'); } catch { /* 忽略 */ }
+  // 文件页签: 进入时刷新 FTP 目录
+  try { setFilesVisible(tab === 'files'); } catch { /* 忽略 */ }
+  // 遥控学习页签: 进入时刷新设备状态/已学码,离开时停止学习
+  try { setRcVisible(tab === 'rc'); } catch { /* 忽略 */ }
+  // 电池页签: 进入时启动蓝牙轮询,离开时停止(避免与 WiFi 争用射频)
+  try { setBatteryVisible(tab === 'battery'); } catch { /* 忽略 */ }
+  // 关于页签: 进入时查询主控/Web 版本信息
+  try { setAboutVisible(tab === 'about'); } catch { /* 忽略 */ }
 
   // 底盘控制器仅在移动控制模式启用
   const isMovement = tab === 'movement';
@@ -683,8 +980,6 @@ const rosUrlInputEl  = document.querySelector('#ros-url-input');
     }
   });
 
-  // 先读「刷新前是否在线」(注册监听器会同步触发一次回调,覆盖为当前状态)
-  const wasConnectedBeforeReload = localStorage.getItem('ros_connected_last') === '1';
   // 连接成功时:持久化地址、push 历史、持久化「刷新前是否在线」
   addStatusListener((state) => {
     if (state.connectionStatus === 'online') {
@@ -692,24 +987,20 @@ const rosUrlInputEl  = document.querySelector('#ros-url-input');
       try { localStorage.setItem('ros_url_last', u); } catch (_) { /* 忽略 */ }
       pushUrlHist(u);
       rosUrlInputEl.value = u;
+      // 重连后拉取 safe_getup 当前状态,供刷新/重连后回显
+      try { publishBehaviorCommand('safe_getup status'); } catch (_) { /* 忽略 */ }
     }
     try { localStorage.setItem('ros_connected_last', state.connectionStatus === 'online' ? '1' : '0'); } catch (_) { /* 忽略 */ }
   });
-  // 仅当刷新前处于连接状态时才自动重连(地址持久化不等于要自动连接)
-  if (saved && wasConnectedBeforeReload) {
-    setTimeout(() => {
-      toggleConnection().catch((err) => console.warn('[main] 自动重连失败:', err));
-    }, 600);
-  }
+  // 页面加载即自动连接 WS:默认同源地址,鉴权靠浏览器自动携带的 jxg_admin cookie,
+  // 无需手动填写 token 或点连接按钮。连接失败/断开由指数退避自动重连兜底。
+  setTimeout(() => {
+    toggleConnection().catch((err) => console.warn('[main] 自动连接失败:', err));
+  }, 300);
 })();
 
 // 参数报警模块:绑定报警配置页控件并恢复持久化规则
 initAlarm();
-
-// 报警记录在触发/结束时由 alarm.js 派发事件 → 立即刷新「录制列表」(触发瞬间即出现,不等报警结束)
-window.addEventListener('web-sim:alarm-recordings-changed', () => {
-  renderRecordingsList();
-});
 
 
 /** 按 rosControlActive + connectionStatus 联动输入框/按钮的 disabled 状态 */
@@ -787,6 +1078,9 @@ function applyRosMovementUiState(state) {
       btn.classList.add('is-disabled');
     }
   });
+  // 「置零选中电机」也带 behavior-pill 类,上面的统一联动会覆盖其选中态;
+  // 这里按「在线 && 已选」重算一次(零页未初始化时跳过)
+  if (zeroPanelReady) refreshZeroSelectionUi();
   // 底盘方向控制按钮:ROS 在线时不应该"禁用",因为它们还应该 publish cmd_vel。
   // 但为了避免本地仿真 + cmd_vel 同时驱动,本地底盘控制器 setEnabled 会在 applyRosUiState 里被关掉。
   const twistLinX = document.getElementById('twist-lin-x');
@@ -811,6 +1105,8 @@ function applyRosMovementUiState(state) {
 /**
  * 根据 ros-bridge 状态刷新顶栏 ROS 控件外观 + 移动控制视图胶囊。
  */
+/** 置零页 DOM 初始化完成标志:addStatusListener 首次回调早于置零页 const 初始化(TDZ),需门控 */
+let zeroPanelReady = false;
 function applyRosUiState(state) {
   const {
     connectionStatus: s, rosControlActive, positionSource, lastError,
@@ -854,19 +1150,12 @@ function applyRosUiState(state) {
     case 'error':      text = `错误 ${rosUrlNice}:${lastError || '连接失败'}`; rosStatusEl.classList.add('ros-error'); break;
     default:           text = '未连接'; rosStatusEl.classList.add('ros-offline');
   }
-  rosStatusEl.textContent = text + rosStatusAppendExtra();
+  rosStatusEl.textContent = text;
   rosStatusEl.title = lastError || fullText || text;
 
   // 连接中/在线 → 禁用地址输入框;离线/错误 → 可改地址
   const locked = s === 'online' || s === 'connecting';
-
-  // 复现时,强制锁死 ROS 地址输入框(即使现在 offline 也不能切)
-  const replayLocked = isReplaying();
-  setRosInputsDisabled(locked || replayLocked);
-
-  // 如果正在复现,同时把 ROS 连接按钮也禁用(避免播放中再连接真 ROS 数据流冲突)
-  if (rosConnectBtn) rosConnectBtn.disabled = replayLocked;
-  else void (0);
+  setRosInputsDisabled(locked);
 
   const available = s === 'online' || s === 'connecting';
   rosPosSourceEl.disabled = !available;
@@ -881,13 +1170,6 @@ function applyRosUiState(state) {
   if (jointStates.has('FL_hip_joint')) {
     getQuadChassisController().enabled = (activeControlTab === 'movement' && !available);
   }
-  // ROS 在线状态变化 → 同步录制按钮启用态(只有 ROS 在线时未录制态的按钮才可点)
-  // 首次注册 addStatusListener 时 ros-bridge.js 会立即同步触发一次回调,
-  // 此时 replaySeekEl 等 const(L795)尚未初始化(TDZ),用 try/catch 守卫跳过;
-  // 后续状态变化时 const 已就绪,正常调用。
-  try {
-    if (typeof applyRecorderUiState === 'function') applyRecorderUiState();
-  } catch (_) { /* TDZ / DOM 尚未就绪,跳过本次同步 */ }
 }
 
 rosConnectBtn?.addEventListener('click', () => {
@@ -899,6 +1181,38 @@ rosPosSourceEl?.addEventListener('change', () => {
 addStatusListener(applyRosUiState);
 
 // ── 真机命令:行为按钮 + 底盘 cmd_vel 路由 ────────────────
+// ── Twist 读数(数值 + 中心零点方向条):所有 cmd_vel 出口统一走 updateTwistReadout ──
+/** 方向条渲染:中心为零点,正值向右填(accent 青),负值向左填(橙);宽度=|val|/scale 的半条比例 */
+function setTwistGauge(id, val, scale) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const v = Math.max(-1, Math.min(1, scale > 0 ? val / scale : 0));
+  el.style.width = (Math.abs(v) * 50).toFixed(1) + '%';
+  if (v >= 0) { el.style.left = '50%'; el.style.right = 'auto'; }
+  else { el.style.left = 'auto'; el.style.right = '50%'; }
+  el.classList.toggle('is-neg', v < 0);
+}
+/** 方向条量程:跟随当前摇杆速度上限(满偏=满条),滑杆缺失时回退 1.5 */
+function twistGaugeScale(selector, fallback) {
+  const s = document.querySelector(selector);
+  const v = s ? parseFloat(s.value) : NaN;
+  return Number.isFinite(v) && v > 0.05 ? v : fallback;
+}
+/** 刷新 Twist 栏 4 个数值 + 4 条方向条(读 getCmdVelRequest,方向禁用的轴已置 0) */
+function updateTwistReadout() {
+  const out = getCmdVelRequest();
+  const lin = twistGaugeScale('.joy-lin-slider', 1.5);
+  const ang = twistGaugeScale('.joy-ang-slider', 1.5);
+  const linX = document.getElementById('twist-lin-x'); if (linX) linX.value = out.vx.toFixed(2);
+  const linY = document.getElementById('twist-lin-y'); if (linY) linY.value = out.vy.toFixed(2);
+  const linZ = document.getElementById('twist-lin-z'); if (linZ) linZ.value = (out.vz || 0).toFixed(2);
+  const angZ = document.getElementById('twist-ang-z'); if (angZ) angZ.value = out.omega.toFixed(2);
+  setTwistGauge('twist-gauge-x', out.vx, lin);
+  setTwistGauge('twist-gauge-y', out.vy, lin);
+  setTwistGauge('twist-gauge-z', out.vz || 0, lin);
+  setTwistGauge('twist-gauge-w', out.omega, ang);
+}
+
 /**
  * 底盘命令钩子:cartesian.js 里的四足 chassis 所有 vx/vy/omega 命令入口
  * 都会回调到这里。ROS 在线时把它转发为 /rl_real/cmd_vel 持续发布(20Hz keep-alive),离线则忽略。
@@ -908,37 +1222,186 @@ shared.chassisCommandHook = (vx, vy, omega) => {
   // 这样 UI 按钮/键盘不需要额外判断,所有输入路径保持一致。
   // 第 4 参不传 → 保持当前垂直速度(vz 由独立滑块控制,摇杆/旋转不清掉它)。
   setCmdVelRequest(vx, vy, omega);
-  // 同步 twist 读数 DOM(即时,因为 cmdVelPublishCount %20===1 emit 节流可能跟不上手拨滑块)
-  const linX = document.getElementById('twist-lin-x'); if (linX) linX.value = Number(vx).toFixed(2);
-  const linY = document.getElementById('twist-lin-y'); if (linY) linY.value = Number(vy).toFixed(2);
-  const angZ = document.getElementById('twist-ang-z'); if (angZ) angZ.value = Number(omega).toFixed(2);
+  // 显示实际输出值(方向禁用后该方向为 0),与后端回显保持一致
+  updateTwistReadout();
 };
 
 // ── 垂直速度(linear.z):vz 滑块已删除,仅在底盘复位时清零 ROS vz 通道 ──
 /** 复位/停止时把 ROS vz 请求清零 */
 function resetCmdVelVz() {
-  const linZ = document.getElementById('twist-lin-z');
-  if (linZ) linZ.value = '0.00';
   setCmdVelVz(0);
+  updateTwistReadout();
 }
 // 底盘复位按钮(cartesian.js 已有自己的复位逻辑,这里追加清 vz)
 document.getElementById('base-reset')?.addEventListener('click', resetCmdVelVz);
 document.getElementById('quad-base-reset')?.addEventListener('click', resetCmdVelVz);
+
+// ── 摇杆锁定(定速巡航):左右两杆各自独立开关,运行时态不持久化(刷新/重连默认关) ──
+const cruiseLockBtn = document.getElementById('joy-cruise-lock');      // 左杆:vx/vy 速度锁定
+const cruiseLockZBtn = document.getElementById('joy-cruise-lock-z');   // 右杆:ω/Z 转向高度锁定
+function syncCruiseLockBtn(btn, on, label) {
+  if (!btn) return;
+  btn.classList.toggle('is-active', on);
+  btn.setAttribute('aria-pressed', String(on));
+  const txt = btn.querySelector('.joy-lock-text');
+  if (txt) txt.textContent = on ? `${label}：开` : `${label}：关`;
+}
+function applyCruiseLockLeft(on) {
+  setCruiseLockLeft(on);      // cartesian.js:锁当前 vx/vy / 关闭即归零停车
+  syncCruiseLockBtn(cruiseLockBtn, on, '速度锁定');
+  syncLockSliders();          // 锁定期间冻结线速度上限滑杆
+  updateTwistReadout();       // 关锁归零/开锁锁速,读数立即反映
+}
+function applyCruiseLockRight(on) {
+  setCruiseLockRight(on);     // cartesian.js:锁当前 ω/Z / 关闭即转向归零、Z 回站姿
+  syncCruiseLockBtn(cruiseLockZBtn, on, '转向锁定');
+  syncLockSliders();          // 锁定期间冻结角速度上限滑杆
+  updateTwistReadout();
+}
+/** 锁定期冻结速度上限滑杆:左杆锁 vx/vy → 线速度滑杆禁用,右杆锁 ω → 角速度滑杆禁用。
+ * 否则锁定巡航中拖滑杆会直接改变锁定输出的上限(锁定值=摇杆量×上限),造成速度跳变。 */
+function syncLockSliders() {
+  const lockL = !!shared.joystick.cruiseLockedLeft;
+  const lockR = !!shared.joystick.cruiseLockedRight;
+  document.querySelectorAll('.joy-lin-slider').forEach((s) => {
+    if (!('origTitle' in s.dataset)) s.dataset.origTitle = s.title || '';
+    s.disabled = lockL;
+    s.title = lockL ? '速度锁定中:先关闭「速度锁定」再调整线速度上限' : s.dataset.origTitle;
+  });
+  document.querySelectorAll('.joy-ang-slider').forEach((s) => {
+    if (!('origTitle' in s.dataset)) s.dataset.origTitle = s.title || '';
+    s.disabled = lockR;
+    s.title = lockR ? '转向锁定中:先关闭「转向锁定」再调整角速度上限' : s.dataset.origTitle;
+  });
+}
+syncLockSliders();  // 初始同步(默认两杆都未锁,滑杆可用)
+cruiseLockBtn?.addEventListener('click', () => applyCruiseLockLeft(!shared.joystick.cruiseLockedLeft));
+cruiseLockZBtn?.addEventListener('click', () => applyCruiseLockRight(!shared.joystick.cruiseLockedRight));
+// 点底盘复位等同停车:同步解除两个锁定,避免"指令已清零但锁定仍挂着"的状态错配
+document.getElementById('quad-base-reset')?.addEventListener('click', () => { applyCruiseLockLeft(false); applyCruiseLockRight(false); });
+document.getElementById('base-reset')?.addEventListener('click', () => { applyCruiseLockLeft(false); applyCruiseLockRight(false); });
+// 方向输出启用开关:整张轴卡片即开关(卡片内隐藏 checkbox),默认 x 和 ω 启用
+document.querySelectorAll('.twist-v input[type="checkbox"]').forEach((cb) => {
+  const axis = cb.dataset.axis;
+  if (!axis) return;
+  // 同步初始状态(确保 UI 勾选态与 ros-bridge 默认值一致)
+  const initial = getCmdVelAxesEnabled();
+  cb.checked = !!initial[axis];
+  cb.addEventListener('change', () => {
+    setCmdVelAxesEnabled(axis, cb.checked);
+    updateTwistReadout();  // 禁用方向立即归零显示
+  });
+});
 /** 行为按钮点击 → 对应 String burst 发布 3 次 */
-// 置零类事件命令: 单发、耗时约 2s, 点击后立即提示并在冷却期内禁用按钮防重复点击
-const ZERO_CMD_COOLDOWN_MS = { zero: 5000 };
+// 「进入强化学习」特殊处理:先做站姿校验,未站稳直接拒绝(后端 locomotion 门禁同样会拦截)
+document.querySelectorAll('.behavior-pill[data-behavior="locomotion"]').forEach((btn) => {
+  btn.addEventListener('click', async (ev) => {
+    // 拦截默认发布(通用处理器在同元素上后注册,用 stopImmediatePropagation 阻止)
+    ev.stopImmediatePropagation();
+    if (btn.disabled) return;
+    const online = (typeof getStatusSnapshot === 'function')
+        && getStatusSnapshot().connectionStatus === 'online';
+    if (!online) { showToast('ROS 未连接,无法进入强化学习', 'warn'); return; }
+    // 快捷路径:当前已是 locomotion 且 settled → 直接发(重发语义)
+    if (lastPosture && lastPosture.posture === 'locomotion' && lastPosture.settled) {
+      publishBehaviorCommand('locomotion');
+      return;
+    }
+    btn.disabled = true;
+    btn.classList.add('is-pressed');
+    showToast('进入强化学习前:正在执行站姿校验…', 'info');
+    const r = await requestCheckStanding(2500);
+    btn.classList.remove('is-pressed');
+    if (r === null) {
+      showToast('站姿校验超时(未收到结果),已取消进入强化学习', 'warn');
+      btn.disabled = false;
+      return;
+    }
+    if (!r.at_stand) {
+      // 站姿校验未通过 → 直接拒绝,不再提供"强制进入"选项(后端 locomotion 门禁也会兜底拦截)
+      const detail = r.reason || `joint[${r.worst_joint}] err=${(r.worst_err ?? NaN).toFixed?.(3)}rad`;
+      showToast(`站姿校验未通过,已拒绝进入强化学习:${detail}`, 'warn');
+      btn.disabled = false;
+      return;
+    }
+    showToast('✅ 站姿校验通过,进入强化学习', 'info');
+    publishBehaviorCommand('locomotion');
+    setTimeout(() => { btn.disabled = false; }, 1200);
+  }, true); // capture: 先于下方通用处理器执行
+});
+// 置零类事件命令: 单发;可靠置零后端四腿并行+逐台确认,16 台正常 ~0.3s、
+// 含重发最坏 ~1s,冷却 3s 仅为防连点(结果以 zero_result 回执 toast 为准)
+// 最近一帧后端姿态/门禁广播(8Hz,与「门禁」胶囊同源):供行为按钮前置检测使用,
+// 避免本地缓存与后端真实门禁状态错位
+let lastPostureFrame = null;
+addPostureListener((p) => { lastPostureFrame = p; });
+
+const ZERO_CMD_COOLDOWN_MS = { zero: 3000 };
 const ZERO_CMD_LABEL = { zero: '电机置零' };
 document.querySelectorAll('.behavior-pill').forEach((btn) => {
   btn.addEventListener('click', () => {
     const cmd = btn.dataset.behavior;
     if (!cmd) return;
+    // 起立(getup)前置检测:探针门禁。
+    // 优先用后端 8Hz 姿态帧的实时门禁字段(probe_done/probe_ready)——与「门禁」胶囊
+    // 及后端 getup 入口完全同源;仅旧后端不广播该字段时才回退本地 probeResults。
+    // 之前只用本地结果:页面刷新/重连后本地记录清空而后端探针状态仍在,
+    // 出现"胶囊显示探针通过、点击起立却提示需探针"的状态错位。
+    if (cmd === 'getup') {
+      // 卧姿校验门禁(与探针同语义):优先读后端 8Hz 姿态帧 lie_done/lie_ready,
+      // 与「卧姿」胶囊及后端 getup 入口完全同源;旧后端无 lie_done 时跳过预检,
+      // 由后端实时门禁兜底。
+      if (lastPostureFrame && typeof lastPostureFrame.lie_done === 'boolean') {
+        const lieOk = lastPostureFrame.lie_done && lastPostureFrame.lie_ready === true;
+        if (!lieOk) {
+          showToast(lastPostureFrame.lie_done === false
+            ? '起立前需先执行「卧姿校验」(趴下后记录作废,每次起立前需重新校验)'
+            : '卧姿校验未通过:有腿关节偏离零位超限,请先置零再重新校验', 'warn');
+          return;
+        }
+      }
+      let probeOk = null;   // null = 后端未广播实时门禁(旧后端),走本地回退
+      let liveDone = null;
+      if (lastPostureFrame && typeof lastPostureFrame.probe_done === 'boolean') {
+        liveDone = lastPostureFrame.probe_done;
+        const liveReady = lastPostureFrame.probe_ready === true;
+        probeOk = liveDone && liveReady;
+      }
+      if (probeOk === null) {
+        const failed = [];
+        const untested = [];
+        for (let i = 0; i < 16; i++) {
+          const st = probeResults.get(i);
+          if (st === 'fail') failed.push(i);
+          else if (st !== 'ok') untested.push(i);
+        }
+        if (failed.length > 0 || untested.length > 0) {
+          const parts = [];
+          if (untested.length > 0) parts.push(`${untested.length} 台未检测`);
+          if (failed.length > 0) parts.push(`${failed.length} 台无响应`);
+          showToast(`起立前需全部电机探针通过(${parts.join('、')}),请先在「关节管理」执行探针`, 'warn');
+          return;
+        }
+      } else if (!probeOk) {
+        showToast(liveDone === false
+          ? '起立前需先执行电机可控性探针,请先在「关节管理」执行探针'
+          : '探针门禁未通过:存在无响应电机,请先在「关节管理」重新探针确认', 'warn');
+        return;
+      }
+    }
     const cooldown = ZERO_CMD_COOLDOWN_MS[cmd] || 0;
     if (cooldown && btn.disabled) return;
     const ok = publishBehaviorCommand(cmd);
     console.debug(`[main] 点击行为按钮 cmd=${cmd} accepted=${ok}`);
     if (!ok) return;
+    // 趴下即作废整条安全起立流程的视觉进度:立即清芯片(若流程运行中被趴下
+    // 打断,busy 锁留给后端 done fail 帧复位,芯片会先红后由 posture 回趴兜底清空)
+    if (cmd === 'getdown') {
+      clearSafeGetupSteps();
+      if (!safeGetupBusy) resetSafeGetupUi();
+    }
     if (cooldown) {
-      showToast(`${ZERO_CMD_LABEL[cmd]}执行中，约 2 秒，请勿重复点击`, 'info');
+      showToast(`${ZERO_CMD_LABEL[cmd]}执行中，约 1 秒，结果见回执提示`, 'info');
       btn.disabled = true;
       btn.classList.add('is-pressed');
       setTimeout(() => {
@@ -955,9 +1418,229 @@ document.querySelectorAll('.behavior-pill').forEach((btn) => {
 
 // 机器人命令应答(/rl_real/feedback) → toast: 置零完成的唯一可见信号
 addCommandFeedbackListener((text) => {
-  const warn = /reject|unknown|not ready|fail/i.test(text);
-  showToast(`机器人应答:${text}`, warn ? 'warn' : 'info');
+  // 可靠置零结构化回执:逐台真实结果(后端经反馈确认,非"命令已发"),
+  // 交置零页处理并抑制原始 JSON toast
+  if (typeof text === 'string' && text.startsWith('zero_result ')) {
+    handleZeroResult(text.slice('zero_result '.length));
+    return;
+  }
+  // 安全起立流程进行中:safe_getup 系列回执(accepted/rejected/内部进度)由流程自身
+  // 与后端 success/error Notify 提示,抑制通用英文应答 toast
+  if (safeGetupBusy && typeof text === 'string' && /safe_getup/.test(text)) {
+    return;
+  }
+  // 将后端英文应答翻译为中文展示
+  let display = text;
+  let type = 'info';
+  // 已知的 getup 拒绝原因(后端英文→中文)
+  const rejectReasonMap = {
+    'motors not probed': '电机未执行可控性探针',
+    'some motors not controllable': '存在不可控电机',
+    'IMU no data': 'IMU 无数据',
+    'not at standing pose': '未处于站立姿态',
+    'joint feedback invalid': '关节反馈无效',
+    'read default_dof_pos failed': '读取站立期望角失败',
+  };
+  if (/command accepted/i.test(text)) {
+    display = '命令已接受: ' + text.replace(/command accepted:?\s*/i, '');
+  } else if (/command rejected/i.test(text)) {
+    let reason = text.replace(/command rejected:?\s*/i, '');
+    // 尝试匹配已知原因并翻译
+    for (const [en, zh] of Object.entries(rejectReasonMap)) {
+      if (reason.includes(en)) { reason = reason.replace(en, zh); break; }
+    }
+    display = '命令被拒绝: ' + reason;
+    type = 'warn';
+  } else if (/unknown command/i.test(text)) {
+    display = '未知命令: ' + text.replace(/unknown command:?\s*/i, '');
+    type = 'warn';
+  } else if (/not ready/i.test(text)) {
+    display = '系统未就绪: ' + text.replace(/not ready:?\s*/i, '');
+    type = 'warn';
+  } else {
+    const warn = /reject|unknown|not ready|fail/i.test(text);
+    type = warn ? 'warn' : 'info';
+  }
+  showToast(`机器人应答:${display}`, type);
+  // 兼容旧后端: 单电机置零 accepted 文本回执
+  const m = /zero_motor\s+(\d{1,2})/i.exec(text);
+  if (m && /accepted/i.test(text)) markMotorZeroed(Number(m[1]));
 });
+
+// ── 姿态显示:后端 8Hz posture 帧 → 「当前姿态」胶囊 ──
+const POSTURE_LABEL = {
+  lying:       { text: '趴下',       cls: 'posture-lying' },
+  standing:    { text: '站立',       cls: 'posture-standing' },
+  locomotion:  { text: '强化学习',   cls: 'posture-locomotion' },
+  diff_drive:  { text: '四轮差速',   cls: 'posture-standing' },
+  transition:  { text: '切换中…',    cls: 'posture-transition' },
+  unknown:     { text: '— 未知 —',   cls: 'posture-unknown' },
+};
+/** 最近一次姿态帧(供 RL 进入检测读取) */
+let lastPosture = null;
+installDiffDriveUi({ addPosture: addPostureListener, addStatus: addStatusListener,
+  send: publishBehaviorCommand,
+  stop: () => { stopCmdVel(); updateTwistReadout(); } });
+function renderPosture(p) {
+  lastPosture = p;
+  const pills = document.querySelectorAll('.posture-pill');
+  if (pills.length === 0) return;
+  const info = POSTURE_LABEL[p.posture] || POSTURE_LABEL.unknown;
+  const title = `FSM: ${p.fsm || 'unknown'} · settled=${p.settled} · motors_ready=${p.motors_ready} · can_ready=${p.can_ready === null ? '未知' : p.can_ready}`;
+  const fsmShort = (p.fsm || '').replace(/^RLFSMState/, '');
+  pills.forEach((pill) => {
+    if (pill.textContent !== info.text) pill.textContent = info.text;
+    pill.className = 'posture-pill ' + info.cls;
+    pill.title = title;
+    const canEl = renderCanPill(pill, p.can_ready);
+    const gateEl = renderGatePill(canEl, p);
+    const lieEl = renderLiePill(gateEl, p);
+    renderProbePill(lieEl, p);
+  });
+  document.querySelectorAll('.posture-fsm').forEach((fsmEl) => {
+    if (fsmEl.textContent !== fsmShort) fsmEl.textContent = fsmShort;
+  });
+}
+
+/**
+ * 在姿态胶囊旁渲染 CAN 实时状态胶囊(随姿态帧 8Hz)。
+ * true=16 电机反馈全部新鲜(绿);false=存在超时电机,动作指令会被后端拒绝(红);
+ * null=后端不广播该字段(旧版本),隐藏。每个 posture-pill 只注入一次。
+ */
+function renderCanPill(pill, canReady) {
+  let can = pill.nextElementSibling;
+  if (!can || !can.classList.contains('can-pill')) {
+    can = document.createElement('span');
+    can.className = 'can-pill';
+    pill.insertAdjacentElement('afterend', can);
+  }
+  if (canReady === null || canReady === undefined) { can.hidden = true; return can; }
+  can.hidden = false;
+  if (canReady) {
+    can.textContent = 'CAN 正常';
+    can.className = 'can-pill is-ok';
+    can.title = '16 个电机反馈均在 500ms 内';
+  } else {
+    can.textContent = 'CAN 断线';
+    can.className = 'can-pill is-bad';
+    can.title = '有电机反馈超过 500ms 未更新：起立/行走/趴下指令将被拒绝';
+  }
+  return can;
+}
+
+/**
+ * 姿态胶囊旁的三枚门禁胶囊(随姿态帧 8Hz 实时刷新,判定与后端命令入口同源):
+ *   站姿门禁 → 进强化学习:12 腿关节在站立期望 ±0.30rad 内且静止(stand_ready);
+ *   卧姿门禁 → 起立:「卧姿校验」手动结果,与探针同语义(lie_done/lie_ready,
+ *              趴下即作废转灰,不跨趴下周期);
+ *   探针门禁 → 起立:16 台电机可控性探针全部通过(probe_ready/probe_done)。
+ * 字段缺失(旧后端)时隐藏;lie_done 缺失但 lie_ready 存在时回退旧实时语义。
+ */
+function ensurePill(prevEl, token, fullCls) {
+  let el = prevEl?.nextElementSibling;
+  if (!el || !el.classList.contains(token)) {
+    el = document.createElement('span');
+    el.className = fullCls || token;
+    prevEl.insertAdjacentElement('afterend', el);
+  }
+  return el;
+}
+
+function renderGatePill(canEl, p) {
+  if (!canEl) return null;
+  const gate = ensurePill(canEl, 'gate-pill');
+  const ready = p.stand_ready;
+  if (ready === null || ready === undefined) { gate.hidden = true; return gate; }
+  gate.hidden = false;
+  if (ready) {
+    gate.textContent = '站姿 通过';
+    gate.className = 'gate-pill is-ok';
+    gate.title = '站姿门禁(进强化学习):当前姿态满足条件(站立期望 ±0.30rad 内且关节静止)';
+  } else {
+    gate.textContent = '站姿 未通过';
+    gate.className = 'gate-pill is-bad';
+    const err = (typeof p.stand_err === 'number' && p.stand_err >= 0)
+      ? `;最差偏差 ${p.stand_err.toFixed(3)}rad(joint${p.stand_joint})` : '';
+    gate.title = `站姿门禁未通过,拒绝进入强化学习:${p.stand_reason || '未处于站立姿态'}${err}`;
+  }
+  return gate;
+}
+
+function renderLiePill(gateEl, p) {
+  if (!gateEl) return null;
+  const lie = ensurePill(gateEl, 'lie-pill', 'gate-pill lie-pill');
+  // 新语义(后端广播 lie_done):与探针同三态——未检测(灰)/通过(绿)/未通过(红)。
+  // 结果仅来自「卧姿校验」按钮,趴下即作废转灰,不跨趴下周期。
+  if (typeof p.lie_done === 'boolean') {
+    lie.hidden = false;
+    if (!p.lie_done) {
+      lie.textContent = '卧姿 未检测';
+      lie.className = 'gate-pill lie-pill is-idle';
+      lie.title = '卧姿门禁(起立):本次趴下周期尚未执行「卧姿校验」,拒绝起立。请先执行「卧姿校验」';
+    } else if (p.lie_ready) {
+      lie.textContent = '卧姿 通过';
+      lie.className = 'gate-pill lie-pill is-ok';
+      lie.title = '卧姿门禁(起立):卧姿校验通过,腿关节均在零位邻域(|q|≤1.0rad),允许起立。趴下后记录作废,需重新校验';
+    } else {
+      lie.textContent = '卧姿 未通过';
+      lie.className = 'gate-pill lie-pill is-bad';
+      lie.title = '卧姿门禁未通过:卧姿校验时有腿关节偏离零位超过 1.0rad(或 CAN 断线),拒绝起立。请先置零再重新校验';
+    }
+    return lie;
+  }
+  // 旧后端回退:无 lie_done 但有 lie_ready(实时判定语义)
+  const ready = p.lie_ready;
+  if (ready === null || ready === undefined) { lie.hidden = true; return lie; }
+  lie.hidden = false;
+  if (ready) {
+    lie.textContent = '卧姿 通过';
+    lie.className = 'gate-pill lie-pill is-ok';
+    lie.title = '卧姿门禁(起立):腿关节均在零位邻域(|q|≤1.0rad),允许起立';
+  } else {
+    lie.textContent = '卧姿 未通过';
+    lie.className = 'gate-pill lie-pill is-bad';
+    lie.title = '卧姿门禁未通过:有腿关节偏离零位超过 1.0rad,拒绝起立(请先置零)。站立时该门禁天然不适用,照实显示未通过';
+  }
+  return lie;
+}
+
+function renderProbePill(lieEl, p) {
+  if (!lieEl) return;
+  const probe = ensurePill(lieEl, 'probe-pill', 'gate-pill probe-pill');
+  const done = p.probe_done;
+  const ready = p.probe_ready;
+  if (done === null || done === undefined) { probe.hidden = true; return; }
+  probe.hidden = false;
+  if (!done) {
+    probe.textContent = '探针 未检测';
+    probe.className = 'gate-pill probe-pill is-idle';
+    probe.title = '探针门禁:本次运行尚未执行电机可控性探针,拒绝起立。请先在「关节管理」执行探针';
+  } else if (ready) {
+    probe.textContent = '探针 通过';
+    probe.className = 'gate-pill probe-pill is-ok';
+    probe.title = '探针门禁(起立):16 台电机可控性探针全部通过';
+  } else {
+    probe.textContent = '探针 未通过';
+    probe.className = 'gate-pill probe-pill is-bad';
+    probe.title = '探针门禁未通过:存在无响应电机,拒绝起立。请在「关节管理」重新探针确认';
+  }
+}
+addPostureListener(renderPosture);
+
+// ── 进入 RL 前站立检测:点击「进入 RL」时先校验,未站稳则确认/拒绝 ──
+/** 等待一次 check_standing_result 的 Promise(带超时) */
+function requestCheckStanding(timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => { if (!done) { done = true; off(); resolve(null); } }, timeoutMs);
+    const off = addCheckStandingListener((r) => {
+      if (done) return;
+      done = true; clearTimeout(timer); off(); resolve(r);
+    });
+    // 通过 command 通道触发后端 HandleCheckStanding
+    publishBehaviorCommand('check_standing');
+  });
+}
 
 // ── 置零页签:4 腿 × 4 关节电机选择矩阵(多选) + 实时位置标红 + 单/多电机置零 ──
 const ZERO_MOTOR_LEGS = ['FL', 'FR', 'RL', 'RR'];
@@ -967,11 +1650,118 @@ const ZERO_POS_TOLERANCE_RAD = 0.1;
 const zeroMotorGrid = document.getElementById('zero-motor-grid');
 const zeroMotorBtn = document.getElementById('zero-motor-btn');
 const zeroSelectRedBtn = document.getElementById('zero-select-red-btn');
-const zeroSelectedLabel = document.getElementById('zero-selected-label');
 /** 已选电机 motor_id 集合(多选) */
 const zeroSelectedMotors = new Set();
 /** 电机格元素表:{ cell, posEl, motorId, shortLabel } */
 const zeroMotorCells = [];
+/** 已成功置零的电机集合(仅本会话有效;反馈帧驱动,见 addCommandFeedbackListener) */
+const zeroedMotors = new Set();
+/** 探针结果内存状态:motor_id → 'ok'|'fail'|'running'|'waiting'|null(未检测) */
+const probeResults = new Map();
+
+/** 重置本地探针状态:趴下后后端作废探针记录(RLFSMStatePassive::Enter 调
+ *  invalidateProbeResults,posture 帧 probe_done 翻转为 false),内存 Map 与
+ *  探针卡片须同步恢复"未检测",避免"胶囊灰、卡片仍可控 ✅"的新错位。 */
+function resetLocalProbeResults() {
+  for (let i = 0; i < 16; i++) {
+    probeResults.delete(i);
+    const rec = zeroMotorCells[i];
+    if (!rec) continue;
+    rec.cell.classList.remove('is-probe-ok', 'is-probe-fail', 'is-probe-running');
+    rec.probeStateEl.textContent = '未检测';
+  }
+  const status = document.getElementById('probe-status');
+  if (status) {
+    status.textContent = '探针记录已失效(趴下后需重新探针)';
+    status.className = 'probe-status';
+  }
+}
+
+// 监听 posture 帧 probe_done 的 true→false 翻转(=后端趴下作废探针记录的瞬间),
+// 仅在翻转时重置:探针进行中 valid 本就逐步写入,不受影响
+let lastProbeDone = null;
+addPostureListener((p) => {
+  if (typeof p.probe_done !== 'boolean') return;
+  if (lastProbeDone === true && p.probe_done === false) resetLocalProbeResults();
+  lastProbeDone = p.probe_done;
+});
+
+// 回到「已趴下稳态」即清空安全起立步骤芯片——与后端 Passive::Enter 作废物语义对齐,
+// 覆盖任何趴下入口(摇杆区/快捷栏/其他 ROS 客户端/手柄)。流程运行中(busy)起点本就
+// 是趴姿(lie/probe 阶段),绝不能清;仅在芯片存在非 idle 态时操作,避免每 8Hz 刷 DOM。
+addPostureListener((p) => {
+  if (safeGetupBusy || !safeGetupStepsDirty) return;
+  if (p && p.posture === 'lying' && p.settled) clearSafeGetupSteps();
+});
+/** 标记某电机置零成功:格子保持绿色选中框,再次点击可选择/取消不影响该标记 */
+function markMotorZeroed(motorId) {
+  if (!Number.isInteger(motorId) || motorId < 0 || motorId >= 16) return;
+  zeroedMotors.add(motorId);
+  const rec = zeroMotorCells[motorId];
+  if (rec) {
+    rec.cell.classList.add('zeroed');
+    if (rec.zeroStateEl) rec.zeroStateEl.textContent = '置零 ✅';
+  }
+}
+
+/** 标记电机置零失败(撤销成功状态,恢复"未置零") */
+function markMotorNotZeroed(motorId) {
+  if (!Number.isInteger(motorId) || motorId < 0 || motorId >= 16) return;
+  zeroedMotors.delete(motorId);
+  const rec = zeroMotorCells[motorId];
+  if (rec) {
+    rec.cell.classList.remove('zeroed');
+    if (rec.zeroStateEl) rec.zeroStateEl.textContent = '未置零';
+  }
+}
+
+/** 置零命令进行中时间戳(0=空闲);收到 zero_result 或兜底超时后清零 */
+let zeroPendingAt = 0;
+let zeroPendingTimer = null;
+
+/** 结束置零等待态:解锁按钮(由 refreshZeroSelectionUi 按选择集最终决定可用态) */
+function finishZeroPending() {
+  zeroPendingAt = 0;
+  if (zeroPendingTimer) { clearTimeout(zeroPendingTimer); zeroPendingTimer = null; }
+  if (zeroMotorBtn) zeroMotorBtn.classList.remove('is-pressed');
+}
+
+/** 处理后端 zero_result JSON:真实成功/失败列表驱动格子与下一轮重试选择集 */
+function handleZeroResult(jsonStr) {
+  let r;
+  try {
+    r = JSON.parse(jsonStr);
+  } catch (e) {
+    showToast('置零回执解析失败,请按格子红绿状态人工确认', 'warn');
+    finishZeroPending();
+    refreshZeroSelectionUi();
+    return;
+  }
+  const zeroed = Array.isArray(r.zeroed) ? r.zeroed.filter(Number.isInteger) : [];
+  const failed = Array.isArray(r.failed) ? r.failed.filter(Number.isInteger) : [];
+
+  zeroed.forEach((id) => markMotorZeroed(id));
+  failed.forEach((id) => {
+    // 重发后仍失败:撤销历史成功标记,等待下一轮重试
+    markMotorNotZeroed(id);
+  });
+  // 选择集收敛:成功的移除(已完成),失败的保留/勾上——直接再点一次即只重试失败台,
+  // 不必重新"全选标红"。这是消除"置零要反复点很多遍"的关键交互。
+  zeroed.forEach((id) => zeroSelectedMotors.delete(id));
+  failed.forEach((id) => {
+    zeroSelectedMotors.add(id);
+    zeroMotorCells[id]?.cell.classList.add('selected');
+  });
+  zeroMotorCells.forEach(({ cell }) => cell.classList.toggle('selected', zeroSelectedMotors.has(cell.dataset.motorId * 1)));
+
+  if (failed.length === 0) {
+    showToast(`置零成功:${zeroed.length} 个电机已反馈确认`, 'info');
+  } else {
+    showToast(`置零完成:成功 ${zeroed.length} 个,失败 ${failed.length} 个(#${failed.join(', #')}),已自动勾选,直接再点即可重试`, 'warn');
+  }
+  finishZeroPending();
+  refreshZeroSelectionUi();
+}
 
 /** 读取某 motor_id 的实时位置(rad);无遥测时返回 undefined */
 function zeroMotorPos(motorId) {
@@ -981,73 +1771,117 @@ function zeroMotorPos(motorId) {
   return Number.isFinite(pos) ? pos : undefined;
 }
 
-/** 刷新已选摘要文本与置零按钮可用态 */
+/** 刷新置零按钮可用态。
+ *  可用条件 = ROS 在线 且 已选至少 1 个电机(离线/未选均禁用);
+ *  applyRosUiState 的在线状态联动也会回调本函数,避免统一禁用逻辑覆盖选中态。 */
 function refreshZeroSelectionUi() {
-  if (!zeroMotorBtn || !zeroSelectedLabel) return;
+  if (!zeroMotorBtn) return;
   const n = zeroSelectedMotors.size;
+  const online = (typeof getStatusSnapshot === 'function')
+      && getStatusSnapshot().connectionStatus === 'online';
+  // "探针选中"按钮与选中集联动(有选中即启用,无需 ROS 在线也可点)
+  const probeSelectedBtn = document.getElementById('probe-selected-btn');
+  if (probeSelectedBtn) probeSelectedBtn.disabled = n === 0;
   if (n === 0) {
-    zeroSelectedLabel.textContent = '未选择电机(点击电机格多选)';
     zeroMotorBtn.disabled = true;
-    zeroMotorBtn.textContent = '置零选中电机';
+    zeroMotorBtn.textContent = '置零选中';
     return;
   }
-  const labels = [...zeroSelectedMotors].sort((a, b) => a - b)
-    .map((id) => zeroMotorCells[id]?.shortLabel || `#${id}`);
-  zeroSelectedLabel.textContent = `已选 ${n} 个:${labels.join('、')}`;
-  zeroMotorBtn.disabled = false;
-  zeroMotorBtn.textContent = `置零选中电机 (${n})`;
+  zeroMotorBtn.disabled = !online;
+  zeroMotorBtn.textContent = `置零选中 (${n})`;
 }
 
-if (zeroMotorGrid && zeroMotorBtn && zeroSelectedLabel) {
+if (zeroMotorGrid && zeroMotorBtn) {
   // 生成 16 电机选择矩阵:motor_id = 腿*4 + 关节(与后端 motor_map_ 顺序一致)
+  // 合并置零选择 + 探针状态/按钮,一个格子同时承载两个功能
   ZERO_MOTOR_LEGS.forEach((leg, legIdx) => {
     ZERO_MOTOR_JOINTS.forEach((joint, jointIdx) => {
       const motorId = legIdx * 4 + jointIdx;
-      const cell = document.createElement('button');
-      cell.type = 'button';
+      const cell = document.createElement('div');
       cell.className = 'zero-motor-cell';
       cell.dataset.motorId = String(motorId);
       cell.title = `motor_id=${motorId}(ttycan${legIdx + 1} / CAN ID ${4 - jointIdx})`;
+      // 名称行
       const nameEl = document.createElement('span');
       nameEl.className = 'zero-name';
       nameEl.textContent = `${leg}·${joint}`;
+      const idEl = document.createElement('span');
+      idEl.className = 'zero-mid';
+      idEl.textContent = `m${motorId}`;
+      // 位置行(置零用)
       const posEl = document.createElement('span');
       posEl.className = 'zero-pos';
       posEl.textContent = '—';
-      cell.append(nameEl, posEl);
+      // 探针行:探针状态 + 置零状态(无单台按钮,统一用工具栏"探针选中")
+      const probeRow = document.createElement('div');
+      probeRow.className = 'zero-probe-row';
+      const probeStateEl = document.createElement('span');
+      probeStateEl.className = 'zero-probe-state';
+      probeStateEl.textContent = '未检测';
+      const zeroStateEl = document.createElement('span');
+      zeroStateEl.className = 'zero-zero-state';
+      zeroStateEl.textContent = '未置零';
+      probeRow.append(probeStateEl, zeroStateEl);
+      cell.append(nameEl, idEl, posEl, probeRow);
+      // 点击格子 = 选择(共享选择集,用于置零/探针)
       cell.addEventListener('click', () => {
-        // 多选:再次点击取消
         if (zeroSelectedMotors.has(motorId)) zeroSelectedMotors.delete(motorId);
         else zeroSelectedMotors.add(motorId);
         cell.classList.toggle('selected', zeroSelectedMotors.has(motorId));
         refreshZeroSelectionUi();
       });
-      zeroMotorCells[motorId] = { cell, posEl, motorId, shortLabel: `${leg}·${joint}` };
+      zeroMotorCells[motorId] = { cell, posEl, probeStateEl, probeBtn: null, zeroStateEl, motorId, shortLabel: `${leg}·${joint}` };
+      // 从内存状态恢复探针结果(页面重建/切换页签后保持)
+      const savedProbe = probeResults.get(motorId);
+      if (savedProbe === 'ok') {
+        cell.classList.add('is-probe-ok');
+        probeStateEl.textContent = '可控 ✅';
+      } else if (savedProbe === 'fail') {
+        cell.classList.add('is-probe-fail');
+        probeStateEl.textContent = '无响应 ❌';
+      } else if (savedProbe === 'running' || savedProbe === 'waiting') {
+        cell.classList.add('is-probe-running');
+        probeStateEl.textContent = savedProbe === 'running' ? '探针中...' : '等待中...';
+      }
+      // 从内存状态恢复置零结果
+      if (zeroedMotors.has(motorId)) {
+        cell.classList.add('zeroed');
+        zeroStateEl.textContent = '置零 ✅';
+      }
       zeroMotorGrid.appendChild(cell);
     });
   });
 
-  // 置零选中电机:二次确认后逐个单发(间隔 600ms,对齐后端单台处理耗时)
-  zeroMotorBtn.addEventListener('click', () => {
-    if (zeroSelectedMotors.size === 0 || zeroMotorBtn.disabled) return;
+  // 置零选中电机:一条 zero_motors 批量命令(后端四腿并行+逐台反馈确认+自动重发,
+  // 16 台 ~0.3s);按钮等待 zero_result 回执解锁,失败台自动保留勾选可一键重试
+  zeroMotorBtn.addEventListener('click', async () => {
+    if (zeroSelectedMotors.size === 0 || zeroMotorBtn.disabled || zeroPendingAt) return;
     const ids = [...zeroSelectedMotors].sort((a, b) => a - b);
     const labels = ids.map((id) => zeroMotorCells[id]?.shortLabel || `#${id}`).join('、');
-    if (!window.confirm(`确认对以下 ${ids.length} 个电机执行置零?\n${labels}\n\n这些电机的当前位置将被写为零点!`)) return;
-    let sent = 0;
-    ids.forEach((id, i) => {
-      setTimeout(() => {
-        const ok = publishBehaviorCommand(`zero_motor ${id}`);
-        sent += 1;
-        if (!ok && sent === 1) showToast('ROS 未连接,无法置零', 'warn');
-      }, i * 600);
+    const ok = await confirmDialog({
+      title: `确认置零 ${ids.length} 个电机?`,
+      message: `${labels}\n\n这些电机的当前位置将被写为零点!请确认机器人处于趴下/被动态(Passive)。`,
+      confirmText: '置零', danger: true,
     });
-    showToast(`正在置零 ${ids.length} 个电机,请勿重复点击`, 'info');
+    if (!ok) return;
+    const sent = publishBehaviorCommand(`zero_motors ${ids.join(',')}`);
+    if (!sent) {
+      showToast('ROS 未连接,无法置零', 'warn');
+      return;
+    }
+    showToast(`正在置零 ${ids.length} 个电机…`, 'info');
+    zeroPendingAt = performance.now();
     zeroMotorBtn.disabled = true;
     zeroMotorBtn.classList.add('is-pressed');
-    setTimeout(() => {
-      zeroMotorBtn.classList.remove('is-pressed');
-      refreshZeroSelectionUi();
-    }, (ids.length - 1) * 600 + ZERO_CMD_COOLDOWN_MS.zero);
+    // 兜底:后端极端情况下无回执(WS 断链等),12s 后自动解锁(正常往返 <1s)
+    if (zeroPendingTimer) clearTimeout(zeroPendingTimer);
+    zeroPendingTimer = setTimeout(() => {
+      if (zeroPendingAt) {
+        finishZeroPending();
+        refreshZeroSelectionUi();
+        showToast('置零应答超时,请按格子红绿状态确认', 'warn');
+      }
+    }, 12000);
   });
 
   // 全选标红电机:一键选中所有偏离零位超过阈值的电机
@@ -1067,12 +1901,13 @@ if (zeroMotorGrid && zeroMotorBtn && zeroSelectedLabel) {
   });
 
   refreshZeroSelectionUi();
+  zeroPanelReady = true;
 }
 
 /** 置零页实时刷新:位置数值 + 偏零标红(仅页签可见时,~5Hz 节流,由动画循环调用) */
 let zeroPanelLastRefreshAt = 0;
 function updateZeroPanel() {
-  const view = document.getElementById('zero-control-view');
+  const view = document.getElementById('joint-control-view');
   if (!view || view.hidden || zeroMotorCells.length === 0) return;
   const now = performance.now();
   if (now - zeroPanelLastRefreshAt < 200) return;
@@ -1085,91 +1920,260 @@ function updateZeroPanel() {
   });
 }
 
-// ── 检查站立按钮(ROS 指令页主按钮 + 移动控制页快捷按钮) ──
-const checkStandBtns = document.querySelectorAll('#check-stand-btn, .check-stand-quick');
+// ── 「卧姿校验」按钮(趴姿近零位检测,决定能否 getup) —— 移动控制快捷栏 + ROS 指令页 ──
+const checkStandBtns = document.querySelectorAll('.check-stand-btn');
 checkStandBtns.forEach((checkStandBtn) => {
   checkStandBtn.addEventListener('click', () => {
     const ok = publishCheckStand();
     if (ok) {
-      showToast('正在检查站立条件…', 'info');
+      showToast('正在执行卧姿校验…', 'info');
       checkStandBtn.classList.add('is-pressed');
       setTimeout(() => checkStandBtn.classList.remove('is-pressed'), 600);
     } else {
-      showToast('ROS 未连接,无法检查', 'warn');
+      showToast('ROS 未连接,无法校验', 'warn');
     }
   });
 });
-// 站立检查结果 → toast + console
+// 卧姿校验结果 → toast + console(结果即起立门禁记录,趴下后作废需重新校验)
 addCheckStandListener((result) => {
   if (result.ready) {
-    showToast('✅ 站立条件就绪:电机零位达标,IMU 正常', 'info');
+    showToast('✅ 卧姿校验通过:电机零位达标,IMU 正常,已解锁起立(趴下后需重新校验)', 'info');
   } else {
-    showToast(`⚠ ${result.reason}`, 'warn');
-    console.warn('[check-stand] 不满足站立条件:', result.reason);
+    showToast(`⚠ 卧姿校验未通过:${result.reason}`, 'warn');
+    console.warn('[check-stand] 卧姿校验未通过:', result.reason);
   }
 });
 
-// ── 作业交底语音播报按钮 (/rl_briefing/play,支持多选按点选顺序连播) ──
-const briefingSceneEl = document.querySelector('#briefing-scenes');
-const briefingPlayBtn = document.querySelector('#briefing-play-btn');
-const briefingStopBtn = document.querySelector('#briefing-stop-btn');
-const BRIEFING_SCENE_LABELS = { elevator: '电梯', forklift: '叉车', lifting: '吊装', warehouse: '仓库', height: '高处' };
-/** 已选场景队列(按点选顺序,与 C++ 端逗号分隔多选协议一致) */
-const _briefingOrder = [];
-/** 刷新 chips 的选中态与播放顺序序号 */
-function _refreshBriefingChips() {
-  briefingSceneEl?.querySelectorAll('.scene-chip').forEach((chip) => {
-    const n = _briefingOrder.indexOf(chip.dataset.scene);
-    chip.classList.toggle('is-active', n >= 0);
-    const orderEl = chip.querySelector('.chip-order');
-    if (orderEl) orderEl.textContent = n >= 0 ? `${n + 1}` : '';
-  });
-}
-briefingSceneEl?.querySelectorAll('.scene-chip').forEach((chip) => {
-  chip.addEventListener('click', () => {
-    const scene = chip.dataset.scene;
-    if (!scene) return;
-    const idx = _briefingOrder.indexOf(scene);
-    if (idx >= 0) _briefingOrder.splice(idx, 1);
-    else _briefingOrder.push(scene);
-    _refreshBriefingChips();
+// ── 「站姿校验」按钮(进入强化学习前的站姿校验,check_standing) —— 移动控制快捷栏 + ROS 指令页 ──
+// 只校验、不触发任何动作;与点「进入 RL」时自动触发的校验走同一后端/结果通道
+const checkStandingBtns = document.querySelectorAll('.check-standing-btn');
+checkStandingBtns.forEach((checkStandingBtn) => {
+  checkStandingBtn.addEventListener('click', async () => {
+    if (checkStandingBtn.disabled) return;
+    const online = (typeof getStatusSnapshot === 'function')
+        && getStatusSnapshot().connectionStatus === 'online';
+    if (!online) { showToast('ROS 未连接,无法校验', 'warn'); return; }
+    checkStandingBtn.disabled = true;
+    checkStandingBtn.classList.add('is-pressed');
+    showToast('正在执行站姿校验(12 关节站姿+静止)…', 'info');
+    const r = await requestCheckStanding(2500);
+    checkStandingBtn.classList.remove('is-pressed');
+    checkStandingBtn.disabled = false;
+    if (r === null) {
+      showToast('站姿校验超时(未收到结果)', 'warn');
+    } else if (r.at_stand) {
+      const errTxt = Number.isFinite(r.worst_err) ? `,最大偏差 ${r.worst_err.toFixed(3)}rad` : '';
+      showToast(`✅ 站姿校验通过:关节就位、IMU 正常${errTxt},可以进入强化学习`, 'info');
+    } else {
+      showToast(`⚠ 站姿校验未通过:${r.reason || '未站在期望站姿'}`, 'warn');
+      console.warn('[check-standing] 站姿校验未通过:', r);
+    }
   });
 });
-briefingPlayBtn?.addEventListener('click', () => {
-  if (!briefingSceneEl || !_briefingOrder.length) {
-    showToast('请先点选至少一个交底场景', 'warn');
+
+// ── 摇杆区「安全起立」一键流程(后端编排,前端只发一条命令) ─────────────
+// 命令: publishBehaviorCommand('safe_getup rl')
+// 后端状态机依次执行(每个操作之间固定停顿 1000ms):
+//   卧姿校验 →(1s)→ 探针 →(1s)→ 起立 →(1s)→ 站姿确认 →(1s)→ 进入强化学习
+// 进度帧 notify(type="safe_getup"):
+//   "start[ rl]" / "step <lie|probe|getup|stand|rl> <run|ok|fail|skip>"
+//   / "done ok" / "done fail <step> <reason>"
+// 成功/失败的中文提示由后端 success/error Notify 统一承担。
+const SAFE_GETUP_STEPS = ['lie', 'probe', 'getup', 'stand', 'rl'];
+const SAFE_GETUP_RUN_TEXT = {
+  lie: '① 卧姿校验中…',
+  probe: '② 探针检测中…',
+  getup: '③ 起立中…',
+  stand: '④ 站姿确认中…',
+  rl: '⑤ 进入强化学习中…',
+};
+// 后端拒绝原因(英文)→ 中文;CAN 类原因后端本身就是中文,直接透传
+const SAFE_GETUP_REJECT_ZH = [
+  ['safe getup already running', '安全起立流程已在运行中,请勿重复触发'],
+  ['already in locomotion, no need to get up', '当前已在强化学习行走状态,无需安全起立'],
+  ['rl model is loading, please wait', '强化学习模型加载中,请稍候再试'],
+  ['robot is getting down, wait until settled', '机器人正在趴下,请等动作完成后再试'],
+  ['robot is getting up, wait until settled', '机器人正在起立,请等站稳后再试'],
+  ['fsm not ready', '机器人状态机未就绪,请稍后再试'],
+];
+// 纯 UI 兜底:后端各阶段超时合计约 75s + 4 个 1s 间隔;85s 没收到 done
+// 仅解锁按钮显示(后端流程仍按自身状态机继续/收尾,互不影响)
+const SAFE_GETUP_UI_TIMEOUT_MS = 85000;
+let safeGetupBusy = false;
+let safeGetupBtn = null;
+let safeGetupUiTimer = null;
+
+/** 更新安全起立按钮内分段进度条状态:idle|run|ok|fail|skip */
+let safeGetupStepsDirty = false;  // 分段是否存在任一非 idle 视觉态
+function setSafeGetupStep(name, state) {
+  document.querySelectorAll(`.safe-getup-track .sg-seg[data-step="${name}"]`).forEach((el) => {
+    el.classList.remove('is-run', 'is-ok', 'is-fail', 'is-skip');
+    if (state && state !== 'idle') el.classList.add('is-' + state);
+  });
+  if (state && state !== 'idle') safeGetupStepsDirty = true;
+}
+
+/**
+ * 清空全部分段(回到未执行态)。趴下即作废:后端 Passive::Enter 已同步作废
+ * 卧姿校验/探针门禁(posture 帧 lie_done/probe_done 回落,门禁胶囊转灰),
+ * 按钮上的进度不能继续挂着全绿/全红,否则与真实门禁状态错位。
+ */
+function clearSafeGetupSteps() {
+  SAFE_GETUP_STEPS.forEach((n) => setSafeGetupStep(n, 'idle'));
+  safeGetupStepsDirty = false;
+}
+
+/** 解锁按钮/趴下键/文案,清 UI 兜底定时器(done 帧或超时都会调) */
+function resetSafeGetupUi() {
+  safeGetupBusy = false;
+  safeGetupBtn = null;
+  if (safeGetupUiTimer) { clearTimeout(safeGetupUiTimer); safeGetupUiTimer = null; }
+  document.querySelectorAll('.safe-getup-btn').forEach((b) => {
+    b.disabled = false;
+    b.classList.remove('is-running');
+    const l = b.querySelector('.safe-getup-label');
+    if (l) l.textContent = '安全起立';
+  });
+  document.querySelectorAll('.safe-getdown-btn').forEach((b) => { b.disabled = false; });
+}
+
+// 进度帧驱动芯片/按钮文案(模块级常驻监听;页面中途载入也能从下一帧续显)
+addNotifyListener((payload) => {
+  if (!payload || payload.type !== 'safe_getup') return;
+  const parts = String(payload.content || '').split(/\s+/);
+  if (parts[0] === 'status') {
+    // 页面刷新/重连后的状态回显: status active | status idle
+    const isActive = parts[1] === 'active';
+    if (isActive) {
+      // 正在运行:锁定按钮,等待后续 step 帧更新进度
+      safeGetupBusy = true;
+      if (safeGetupBtn) {
+        safeGetupBtn.disabled = true;
+        safeGetupBtn.classList.add('is-running');
+        const l = safeGetupBtn.querySelector('.safe-getup-label');
+        if (l) l.textContent = '安全起立进行中…';
+      }
+      document.querySelectorAll('.safe-getdown-btn').forEach((b) => { b.disabled = true; });
+    } else {
+      // 未运行:解锁按钮(若步骤全 idle 则完全复位)
+      safeGetupBusy = false;
+      if (safeGetupBtn) {
+        safeGetupBtn.disabled = false;
+        safeGetupBtn.classList.remove('is-running');
+        const l = safeGetupBtn.querySelector('.safe-getup-label');
+        if (l) l.textContent = '安全起立';
+      }
+      document.querySelectorAll('.safe-getdown-btn').forEach((b) => { b.disabled = false; });
+    }
+  } else if (parts[0] === 'step' && parts[1] && parts[2]) {
+    setSafeGetupStep(parts[1], parts[2]);
+    if (parts[2] === 'run' && safeGetupBtn) {
+      const l = safeGetupBtn.querySelector('.safe-getup-label');
+      if (l && SAFE_GETUP_RUN_TEXT[parts[1]]) l.textContent = SAFE_GETUP_RUN_TEXT[parts[1]];
+    }
+  } else if (parts[0] === 'done') {
+    // done ok / done fail:fail 芯片已由先行的 step fail 帧置好;
+    // 成功/失败 toast 由后端 success/error Notify 弹出,这里只收 UI
+    resetSafeGetupUi();
+  }
+});
+
+/** 把 safe_getup 的英文拒绝原因翻成中文(匹配不到则原样返回) */
+function translateSafeGetupReject(text) {
+  let reason = text.replace(/^command rejected:?\s*safe_getup,?\s*/i, '');
+  for (const [en, zh] of SAFE_GETUP_REJECT_ZH) {
+    if (reason.includes(en)) return zh;
+  }
+  return reason || '后端拒绝了安全起立';
+}
+
+async function runSafeGetup(btn) {
+  if (safeGetupBusy) return;
+  const online = (typeof getStatusSnapshot === 'function')
+      && getStatusSnapshot().connectionStatus === 'online';
+  if (!online) { showToast('ROS 未连接,无法执行安全起立', 'warn'); return; }
+
+  if (lastPostureFrame && lastPostureFrame.posture === 'locomotion') {
+    showToast('当前已处于强化学习行走状态,无需安全起立(如需重走流程请先退出强化学习并趴下)', 'warn');
     return;
   }
-  const payload = _briefingOrder.join(',');
-  const ok = publishBriefing(payload);
-  if (ok) {
-    const labelStr = _briefingOrder.map((s) => BRIEFING_SCENE_LABELS[s] || s).join('→');
-    showToast(`🔊 正在播报作业交底(${_briefingOrder.length} 个场景顺序连播):${labelStr}`, 'info');
-    briefingPlayBtn.classList.add('is-pressed');
-    setTimeout(() => briefingPlayBtn.classList.remove('is-pressed'), 600);
-  } else {
-    showToast('ROS 未连接,无法播报', 'warn');
+
+  SAFE_GETUP_STEPS.forEach((n) => setSafeGetupStep(n, 'idle'));
+  safeGetupStepsDirty = false;  // 已主动清空,等待新一轮 step 帧重新标脏
+  safeGetupBusy = true;
+  safeGetupBtn = btn;
+  btn.disabled = true;
+  btn.classList.add('is-running');
+  const labelEl = btn.querySelector('.safe-getup-label');
+  if (labelEl) labelEl.textContent = '安全起立启动中…';
+  document.querySelectorAll('.safe-getdown-btn').forEach((b) => { b.disabled = true; });
+
+  // 等后端受理(notify "start")或拒绝(feedback "command rejected: safe_getup, …");
+  // 3s 无任何应答只解锁 UI(可能 WS 抖动,不能把按钮永久锁死)
+  const ack = await new Promise((resolve) => {
+    let settled = false;
+    const offN = addNotifyListener((p) => {
+      if (!settled && p && p.type === 'safe_getup'
+          && String(p.content || '').startsWith('start')) {
+        settled = true; cleanup(); resolve('start');
+      }
+    });
+    const offF = addCommandFeedbackListener((text) => {
+      if (!settled && typeof text === 'string'
+          && /^command rejected:\s*safe_getup\b/i.test(text)) {
+        settled = true; cleanup(); resolve(text);
+      }
+    });
+    const timer = setTimeout(() => { settled = true; cleanup(); resolve(null); }, 3000);
+    function cleanup() { clearTimeout(timer); offN(); offF(); }
+    // 监听已先注册,再发这唯一一条命令(ros-bridge 对 safe_getup 走 single-shot)
+    if (!publishBehaviorCommand('safe_getup rl')) {
+      settled = true; cleanup(); resolve('sendfail');
+    }
+  });
+
+  if (ack !== 'start') {
+    resetSafeGetupUi();
+    if (ack === null) {
+      showToast('安全起立未收到后端受理确认,请检查连接后重试', 'warn');
+    } else if (ack === 'sendfail') {
+      showToast('安全起立指令发送失败(ROS 未连接),请重试', 'warn');
+    } else {
+      showToast(`⚠ ${translateSafeGetupReject(ack)}`, 'warn');
+    }
+    return;
   }
+
+  // 已受理:后续只跟进度帧走;兜底定时器防止帧丢失导致按钮永久禁用
+  if (safeGetupUiTimer) clearTimeout(safeGetupUiTimer);
+  safeGetupUiTimer = setTimeout(() => {
+    if (!safeGetupBusy) return;
+    resetSafeGetupUi();
+    showToast('安全起立进度同步超时,已重置按钮显示(机器人仍按后端流程执行)', 'warn');
+  }, SAFE_GETUP_UI_TIMEOUT_MS);
+}
+
+document.querySelectorAll('.safe-getup-btn').forEach((btn) => {
+  btn.addEventListener('click', () => { runSafeGetup(btn); });
 });
-briefingStopBtn?.addEventListener('click', () => {
-  const ok = publishBriefing('stop');
-  if (ok) {
-    showToast('已请求停止播报', 'info');
-    briefingStopBtn.classList.add('is-pressed');
-    setTimeout(() => briefingStopBtn.classList.remove('is-pressed'), 600);
-  } else {
-    showToast('ROS 未连接', 'warn');
-  }
-});
-// 播报状态反馈 → toast(相同内容 2s 内去重,防刷屏)
-let _lastBriefingStatusText = '';
-let _lastBriefingStatusAt = 0;
-addBriefingStatusListener((text) => {
-  const now = Date.now();
-  if (text === _lastBriefingStatusText && now - _lastBriefingStatusAt < 2000) return;
-  _lastBriefingStatusText = text;
-  _lastBriefingStatusAt = now;
-  showToast(`🔊 ${text}`, 'info');
+
+// 摇杆区「趴下」按钮:与快捷栏 getdown 同命令,放在安全起立旁边便于一键收回;
+// 安全起立流程运行中禁用,避免流程中打断
+document.querySelectorAll('.safe-getdown-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    if (safeGetupBusy || btn.disabled) return;
+    const online = (typeof getStatusSnapshot === 'function')
+        && getStatusSnapshot().connectionStatus === 'online';
+    if (!online) { showToast('ROS 未连接,无法趴下', 'warn'); return; }
+    if (publishBehaviorCommand('getdown')) {
+      // 趴下即作废安全起立进度:芯片立即清空、按钮解锁(与快捷栏趴下入口同源)
+      clearSafeGetupSteps();
+      resetSafeGetupUi();
+      showToast('正在趴下…', 'info');
+      btn.classList.add('is-pressed');
+      setTimeout(() => btn.classList.remove('is-pressed'), 600);
+    }
+  });
 });
 
 // 每次重新渲染控制面板(切模型后)也重新刷新禁用状态
@@ -1209,10 +2213,22 @@ document.querySelectorAll('[data-preset]').forEach((button) => {
 document.querySelectorAll('[data-control-tab]').forEach((button) => {
   button.addEventListener('click', () => setControlTab(button.dataset.controlTab));
 });
+// 一级分组按钮事件：切到分组的第一个 tab
+document.querySelectorAll('[data-tab-group]').forEach((grpBtn) => {
+  grpBtn.addEventListener('click', () => {
+    const g = grpBtn.dataset.tabGroup;
+    const firstTab = TAB_GROUPS_MAP[g]?.[0];
+    if (firstTab) setControlTab(firstTab);
+  });
+});
 // 相机页签(先于首次 setControlTab 初始化,使持久化页签为 camera 时可见性立即生效)
 initCameraView();
 // Livox 雷达页签同理
 initLidarView();
+// 实时日志页签 + 系统管理页签(终端/WebFTP/电源/HR 日志开关)
+initLogView();
+initSysAdmin();
+initBattery();
 
 // 立即应用持久化的页签,避免刷新后先闪一下默认「话题调试」;
 // 此时模型可能未加载,重建逻辑均有 try/catch,模型就绪后会再应用一次
@@ -1329,18 +2345,27 @@ function updateJoystickDecay(nowMs) {
   const r2 = (v) => Math.round(v * 100) / 100;
   let active = false;
   if (joy.decayLeftStartAt) {
-    const t = 1 - Math.min(1, (nowMs - joy.decayLeftStartAt) / dur);
-    joy.vx = r2((joy.decayLeftVx || 0) * t);
-    joy.vy = r2((joy.decayLeftVy || 0) * t);
-    active = true;
-    if (t <= 0) { joy.vx = 0; joy.vy = 0; joy.decayLeftStartAt = 0; }
+    // 左杆速度锁定中:vx/vy 保持锁定值,不参与衰减
+    if (!joy.cruiseLockedLeft) {
+      const t = 1 - Math.min(1, (nowMs - joy.decayLeftStartAt) / dur);
+      joy.vx = r2((joy.decayLeftVx || 0) * t);
+      joy.vy = r2((joy.decayLeftVy || 0) * t);
+      active = true;
+      if (t <= 0) { joy.vx = 0; joy.vy = 0; joy.decayLeftStartAt = 0; }
+    } else {
+      joy.decayLeftStartAt = 0;
+    }
   }
   if (joy.decayRightStartAt) {
     const t = 1 - Math.min(1, (nowMs - joy.decayRightStartAt) / dur);
-    joy.omega = r2((joy.decayRightOmega || 0) * t);
-    applyJoystickLift(r2((joy.decayRightLift || 0) * t));
+    // 右杆转向/高度锁定中:ω 与 Z 都保持锁定值,不参与衰减
+    if (!joy.cruiseLockedRight) joy.omega = r2((joy.decayRightOmega || 0) * t);
+    if (!joy.cruiseLockedRight) applyJoystickLift(r2((joy.decayRightLift || 0) * t));
     active = true;
-    if (t <= 0) { joy.omega = 0; applyJoystickLift(0); joy.decayRightStartAt = 0; }
+    if (t <= 0) {
+      if (!joy.cruiseLockedRight) { joy.omega = 0; applyJoystickLift(0); }
+      joy.decayRightStartAt = 0;
+    }
   }
   if (!active) return;
   pushJoystickCommand();
@@ -1555,6 +2580,11 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener('keyup', (event) => {
   if (activeControlTab === 'movement' && keyboardCommands[event.key.toLowerCase()]) setChassisCommand(0, 0, 0);
 });
+// 安全网:窗口失焦(alt-tab/切屏)时 keyup 会丢失,keep-alive 会持续发布按下的速度,
+// 机器人将在无人操作时自己走动。失焦立即归零(尾帧逻辑由 ros-bridge 处理)。
+window.addEventListener('blur', () => {
+  if (activeControlTab === 'movement') setChassisCommand(0, 0, 0);
+});
 
 // ── 摇杆速度上限滑杆:线速度 m/s + 角速度 rad/s(0~1.5 连续可调,人形/四足共享,每次进入默认 0.5) ──
 /** 同步单个 range 的位置与已选段填充比例(--fill 供 WebKit 轨道渐变使用) */
@@ -1582,12 +2612,14 @@ function refreshSpeedLimitUi() {
     slider.addEventListener('input', () => {
       setJoystickMaxLinear(Number(slider.value));
       refreshSpeedLimitUi();
+      updateTwistReadout();  // 量程变了,方向条按新上限重新缩放
     });
   });
   document.querySelectorAll('.joy-ang-slider').forEach((slider) => {
     slider.addEventListener('input', () => {
       setJoystickMaxAngular(Number(slider.value));
       refreshSpeedLimitUi();
+      updateTwistReadout();
     });
   });
 })();
@@ -1839,636 +2871,6 @@ function animate(time) {
   requestAnimationFrame(animate);
 }
 
-// ── 录制与复现 ────────────────────────────────────────────
-const recStartBtn = document.querySelector('#recorder-start-btn');
-const replayStopBtn = document.querySelector('#replay-stop-btn');
-const recsClearBtn = document.querySelector('#recordings-clear-btn');
-const recordingsListEl = document.querySelector('#recordings-list');
-const replaySeekEl    = document.querySelector('#replay-seek');
-const replayCurTimeEl = document.querySelector('#replay-cur-time');
-const replayTotalTimeEl = document.querySelector('#replay-total-time');
-// 保存 .replay-seek-wrap 引用,避免列表重建时(detached) querySelector 找不到
-const _replaySeekHost   = document.querySelector('#replay-seek-host');
-let   _replaySeekWrap   = _replaySeekHost ? _replaySeekHost.querySelector('.replay-seek-wrap') : null;
-
-/** 视频监控模式:当前选中的录制 ID(独立于 isReplaying,用于驱动拖动条显示) */
-let _selectedRecordingId = null;
-
-/** 拖动时临时跳过 range.value 同步,避免 input 事件与我们 set value 打架 */
-let _replaySeeking = false;
-
-/* _activeRecordingId / _lastRecStatusRefreshAt / REC_STATUS_REFRESH_MS 声明已在文件顶部
-   避免 addStatusListener → applyRosUiState → rosStatusAppendExtra TDZ 报错 */
-
-/** 格式化时长(ms → mm:ss / 秒 / ms) */
-function formatDuration(ms) {
-  if (!Number.isFinite(ms) || ms <= 0) return '0s';
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s ${Math.floor((ms % 1000) / 10)}`;
-  const mm = Math.floor(s / 60), ss = s % 60;
-  return `${mm}:${String(ss).padStart(2, '0')}`;
-}
-function formatDateTime(ts) {
-  try { return new Date(ts).toLocaleString('zh-CN', { hour12: false }); }
-  catch (_) { return String(ts); }
-}
-
-/** 把 mm:ss 补齐两位分钟位(总时长可能超过 1h 这里只显示到分钟,内部用 ms 做 seek) */
-function _fmtSeekClock(ms) {
-  if (!Number.isFinite(ms) || ms <= 0) return '00:00';
-  const s = Math.floor(ms / 1000);
-  const mm = Math.floor(s / 60), ss = s % 60;
-  return `${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
-}
-
-/** 根据 isReplaying() 状态 + getReplayState,把 seek 条 / 时间文本同步到 DOM
- *  视频监控模式:只要 frames 已加载(无论 isReplaying),都能显示 total 与当前位置 */
-function applyReplaySeekState(preferredElapsedMs /* 可选,seek 后立刻跳到目标,而不是用 wall clock 重算 */) {
-  if (!replaySeekEl) return;
-  const rs = getReplayState();
-  const total = rs.totalDurationMs || 0;
-  const hasFrames = total > 0;
-  const elapsed = Number.isFinite(preferredElapsedMs)
-    ? Math.max(0, Math.min(total, preferredElapsedMs))
-    : (rs.elapsedMs || 0);
-  replaySeekEl.max = String(Math.max(0, total));
-  if (!_replaySeeking) replaySeekEl.value = String(elapsed);
-  replaySeekEl.disabled = !hasFrames;
-  if (replayCurTimeEl)   replayCurTimeEl.textContent   = _fmtSeekClock(elapsed);
-  if (replayTotalTimeEl) replayTotalTimeEl.textContent = _fmtSeekClock(total);
-}
-
-/** 根据 _activeRecordingId / isReplaying() 刷新录制控制按钮禁用态 + 文案。
- *  状态文本与按钮合并:#recorder-start-btn 自身承载状态文本:
- *    - 未录 + 非复现:  ● 开始录制         (灰禁 / 在线则青可点)
- *    - 录制中:          ■ 结束录制 N s    (红可点,每秒刷新秒数)
- *    - 复现中(未录):   ▶ 复现中 N s/M s   (灰禁,显示已复现/总秒数)
- *  录制状态文本仅显示秒(整数),不再含帧数与毫秒位。
- */
-function applyRecorderUiState(options = {}) {
-  const recording = _activeRecordingId != null && isRecording(_activeRecordingId);
-  const replaying = isReplaying();
-  // 先同步一次拖动条(无论是否在复现,只要 total>0 就能显示位置)
-  applyReplaySeekState(options?.elapsedMs);
-  if (recStartBtn) {
-    if (recording) {
-      // 录制中:已录时长本地计算(= Date.now() - startedAt),同步更新。
-      // 之前每次调用都 listRecordings()(IndexedDB 全量读),状态 emit 高频时会造成严重卡顿。
-      const dur = Math.max(0, Date.now() - (_activeRecordingStartedAt || Date.now()));
-      const secs = Math.floor(dur / 1000);
-      recStartBtn.textContent = `■ 结束录制 ${secs}s`;
-      recStartBtn.disabled = false;
-      recStartBtn.classList.add('ros-active');
-      recStartBtn.classList.remove('recorder-idle', 'recorder-replaying');
-      recStartBtn.classList.add('recorder-recording');
-    } else if (replaying) {
-      // 复现中:按钮 disabled,显示已复现/总秒数
-      const rs = getReplayState();
-      const elapsedSec = Math.floor(rs.elapsedMs / 1000);
-      const totalSec = Math.floor(rs.totalDurationMs / 1000);
-      recStartBtn.textContent = `▶ 复现中 ${elapsedSec}s/${totalSec}s`;
-      recStartBtn.disabled = true;
-      recStartBtn.classList.remove('ros-active', 'recorder-recording', 'recorder-idle');
-      recStartBtn.classList.add('recorder-replaying');
-    } else {
-      // 空闲:仅 ROS 在线时可点
-      recStartBtn.textContent = '● 开始录制';
-      const rosOnline = getStatusSnapshot().connectionStatus === 'online';
-      recStartBtn.disabled = !rosOnline || replaying;
-      recStartBtn.classList.remove('ros-active', 'recorder-recording', 'recorder-replaying');
-      recStartBtn.classList.add('recorder-idle');
-    }
-  }
-  if (replayStopBtn) { replayStopBtn.disabled = !replaying; }
-}
-
-/** 渲染 recordings 列表(配置页) */
-async function renderRecordingsList() {
-  if (!recordingsListEl) return;
-  let list = [];
-  try { list = await listRecordings(); }
-  catch (err) {
-    recordingsListEl.innerHTML = `<li class="rec-empty rec-error">加载失败:${err.message || String(err)}</li>`;
-    return;
-  }
-  if (!list.length) {
-    recordingsListEl.innerHTML = `<li class="rec-empty">尚无录制记录 — 连接 ROS 后点击「开始录制」即可</li>`;
-    return;
-  }
-  const replayingId = isReplaying() ? getReplayState().recordingId : null;
-  const selectedId = _selectedRecordingId;
-  const frag = document.createDocumentFragment();
-  for (const r of list) {
-    const li = document.createElement('li');
-    const isAlarmRec = String(r.name || '').startsWith('⚠');
-    li.className = 'recordings-row'
-      + (isAlarmRec ? ' is-alarm-rec' : '')
-      + (replayingId === r.id ? ' is-replaying' : '')
-      + (selectedId === r.id ? ' is-selected' : '');
-    li.dataset.rid = String(r.id);
-    // 列 1:记录名(双击可编辑)
-    const nameCol = document.createElement('span');
-    nameCol.className = 'rec-name-col';
-    const nameLabel = document.createElement('span');
-    nameLabel.className = 'rec-name';
-    nameLabel.textContent = r.name;
-    nameLabel.title = '双击重命名';
-    nameLabel.addEventListener('dblclick', async () => {
-      const input = document.createElement('input');
-      input.className = 'rec-name-input';
-      input.type = 'text';
-      input.value = r.name;
-      const commit = async () => {
-        const v = input.value.trim() || '未命名录制';
-        try { await renameRecording(r.id, v); } catch (_) {}
-        renderRecordingsList();
-      };
-      input.addEventListener('blur', commit, { once: true });
-      input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-        else if (e.key === 'Escape') { input.value = r.name; input.blur(); }
-      });
-      nameCol.replaceChild(input, nameLabel);
-      input.focus(); input.select();
-    });
-    nameCol.appendChild(nameLabel);
-    if (r.rosUrl) {
-      const sub = document.createElement('span');
-      sub.className = 'rec-sub';
-      sub.textContent = r.rosUrl.replace(/^wss?:\/\//i, '');
-      nameCol.appendChild(sub);
-    }
-    li.appendChild(nameCol);
-
-    // 列 2:模型
-    const modelCol = document.createElement('span');
-    modelCol.className = 'rec-model-col';
-    modelCol.textContent = r.modelId ? `模型 ${r.modelId}` : '—';
-    if (r.modelId && String(r.modelId) === String(currentModelId)) {
-      modelCol.classList.add('is-current');
-      modelCol.title = '与当前模型一致';
-    } else if (r.modelId) {
-      modelCol.title = `复现时自动切换到模型 ${r.modelId}`;
-    }
-    li.appendChild(modelCol);
-
-    // 列 3:时间 + 时长
-    const metaCol = document.createElement('span');
-    metaCol.className = 'rec-meta-col';
-    const t1 = document.createElement('span'); t1.className = 'rec-time'; t1.textContent = formatDateTime(r.startedAt); metaCol.appendChild(t1);
-    const t2 = document.createElement('span'); t2.className = 'rec-dur';  t2.textContent = `长 ${formatDuration(r.endedAt ? r.durationMs : (Date.now() - r.startedAt))}`; metaCol.appendChild(t2);
-    li.appendChild(metaCol);
-
-    // 列 4:帧数
-    const framesCol = document.createElement('span');
-    framesCol.className = 'rec-frames-col';
-    framesCol.textContent = `电机 ${r.motorFrameCount} · IMU ${r.imuFrameCount} · 共 ${r.totalFrames}`;
-    li.appendChild(framesCol);
-
-    // 列 5:操作按钮
-    const actCol = document.createElement('span');
-    actCol.className = 'rec-actions-col';
-    const playBtn = document.createElement('button');
-    playBtn.className = 'ros-btn rec-btn-play';
-    playBtn.type = 'button';
-    const isThisReplaying = (replayingId === r.id);
-    const isThisSelected = (selectedId === r.id);
-    const hasThisFrames = isThisSelected && hasFrames();
-    // 根据拖动条位置 + 播放状态决定按钮文字:
-    //   正在播放 → 暂停
-    //   尾部(100%) → 重播
-    //   头部/中间 → 播放
-    let playLabel;
-    if (isThisReplaying) {
-      playLabel = '■ 暂停';
-    } else if (hasThisFrames) {
-      const rs = getReplayState();
-      playLabel = (rs.totalDurationMs > 0 && rs.progress >= 0.999) ? '↻ 重播' : '▶ 播放';
-    } else {
-      playLabel = '▶ 播放';
-    }
-    playBtn.textContent = playLabel;
-    if (isThisReplaying) playBtn.classList.add('ros-active');
-    playBtn.disabled = false;
-    playBtn.addEventListener('click', async () => {
-      try {
-        if (isThisReplaying) {
-          stopReplay(false, true); // not silent, keepFrames=true
-          applyRecorderUiState();
-          renderRecordingsList();
-          return;
-        }
-        if (_activeRecordingId != null) {
-          stopRecStatusTimer();
-          try { await stopRecording(_activeRecordingId); _activeRecordingId = null; applyRecorderUiState(); await renderRecordingsList(); } catch (_) {}
-        }
-        if (isReplaying()) stopReplay(false);
-        if (r.modelId && String(r.modelId) !== String(currentModelId)) {
-          try { await switchModel(String(r.modelId)); }
-          catch (err) { console.warn('[replay] 自动切换模型失败,继续复现:', err); }
-        }
-
-        // 视频监控模式:如果当前记录已选中(帧已加载),从当前 seek 位置开始复现
-        // 但如果是「重播」状态(在尾部),强制从 0 开始
-        if (hasThisFrames) {
-          const rs = getReplayState();
-          const isAtEnd = rs.totalDurationMs > 0 && rs.progress >= 0.999;
-          const startMs = isAtEnd ? 0 : getCurrentSeekMs();
-          await startReplay(r.id, { startMs });
-        } else {
-          // 首次点击:先选中记录(加载帧),然后从 0 开始复现
-          await selectRecording(r.id);
-          await startReplay(r.id, { startMs: 0 });
-        }
-        _selectedRecordingId = r.id;
-        applyRecorderUiState();
-        renderRecordingsList();
-        _syncReplaySeekSlot();
-      } catch (err) {
-        console.error('[replay] 启动失败', err);
-        if (recStartBtn) {
-          recStartBtn.textContent = `复现失败`;
-          recStartBtn.disabled = true;
-          recStartBtn.classList.remove('recorder-recording', 'recorder-replaying', 'recorder-idle', 'ros-active');
-          recStartBtn.classList.add('recorder-error');
-          recStartBtn.title = String(err && err.message || err);
-        }
-      }
-    });
-    actCol.appendChild(playBtn);
-    const delBtn = document.createElement('button');
-    delBtn.className = 'ros-btn rec-btn-del ros-active';
-    delBtn.type = 'button';
-    delBtn.textContent = '删除';
-    delBtn.addEventListener('click', async () => {
-      const ok = await confirmDialog({
-        title: '删除录制记录',
-        message: `${r.name}\n${formatDateTime(r.startedAt)} · 共${r.totalFrames}帧`,
-        confirmText: '删除', danger: true,
-      });
-      if (!ok) return;
-      try {
-        if (isReplaying() && getReplayState().recordingId === r.id) stopReplay(false);
-        if (_selectedRecordingId === r.id) {
-          clearFrames();
-          _selectedRecordingId = null;
-        }
-        await deleteRecording(r.id);
-        purgeAlarmRecordMeta(r.id);
-        renderRecordingsList();
-        _syncReplaySeekSlot();
-      } catch (err) {
-        console.error('[rec] 删除失败', err);
-      }
-    });
-    actCol.appendChild(delBtn);
-    li.appendChild(actCol);
-
-    // 列 6:本行复现进度拖动条 slot(默认隐藏,仅在选中此行时显示)
-    const seekSlot = document.createElement('div');
-    seekSlot.className = 'rec-seek-slot';
-    seekSlot.dataset.rid = String(r.id);
-    seekSlot.hidden = true;
-    li.appendChild(seekSlot);
-
-    // 点击行选中(点击按钮/输入框时不触发)
-    li.addEventListener('click', async (e) => {
-      const tag = (e.target && e.target.tagName) || '';
-      if (tag === 'BUTTON' || tag === 'INPUT') return;
-      if (e.target.closest('.rec-actions-col')) return;
-      await selectRecording(r.id);
-      renderRecordingsList();
-    });
-
-    frag.appendChild(li);
-  }
-  // 清空前:若 wrap 在某个 slot 里,先移回 host 防止 detached(引用仍在,不会丢)
-  if (_replaySeekWrap && _replaySeekHost && _replaySeekWrap.parentElement !== _replaySeekHost) {
-    _replaySeekHost.appendChild(_replaySeekWrap);
-  }
-  // 清空旧内容
-  while (recordingsListEl.firstChild) recordingsListEl.removeChild(recordingsListEl.firstChild);
-  recordingsListEl.appendChild(frag);
-  // 渲染后,若当前正在复现某行,把拖动条移动到该行的 slot
-  _syncReplaySeekSlot();
-}
-
-/**
- * 视频监控模式:选中某条录制,展示其拖动条。
- *  - 如果切换了不同记录,清理旧帧
- *  - 如果当前正在复现此记录,不做额外处理(拖动条本来就该显示)
- *  - 如果当前正在复现另一条记录,先停止复现(保留帧供新记录使用)
- *  @param {number|null} rid  要选中的 recordingId,null 表示取消选中
- */
-async function selectRecording(rid) {
-  const ridNum = rid != null ? Number(rid) : null;
-
-  if (ridNum == null) {
-    _selectedRecordingId = null;
-    clearFrames();
-    _syncReplaySeekSlot();
-    applyReplaySeekState(0);
-    return;
-  }
-
-  // 如果选中的是当前正在复现的记录,直接同步显示
-  if (isReplaying() && getReplayState().recordingId === ridNum) {
-    _selectedRecordingId = ridNum;
-    _syncReplaySeekSlot();
-    applyReplaySeekState();
-    return;
-  }
-
-  // 如果选中的是已加载但未复现的记录(如刚结束复现),保持当前选择
-  if (hasFrames() && !isReplaying() && getReplayState().recordingId === ridNum) {
-    _selectedRecordingId = ridNum;
-    _syncReplaySeekSlot();
-    applyReplaySeekState();
-    return;
-  }
-
-  // 切换到新记录:停掉旧复现(如有),清理旧帧,加载新帧
-  if (isReplaying()) {
-    stopReplay(true);
-  }
-  clearFrames();
-
-  _selectedRecordingId = ridNum;
-  _syncReplaySeekSlot();
-
-  // 预加载帧(异步,完成后更新 seek bar 的 max)
-  try {
-    await loadFramesForPreview(ridNum);
-    applyReplaySeekState(0);
-    renderRecordingsList();
-  } catch (err) {
-    console.warn('[selectRecording] 预加载帧失败:', err);
-    clearFrames();
-    _selectedRecordingId = null;
-    _syncReplaySeekSlot();
-  }
-}
-
-/**
- * 把 #replay-seek-wrap(整个 .replay-seek-wrap 子树)移动到:
- *   - 选中某条记录时:选中行的 .rec-seek-slot(并显示 slot)
- *   - 否则:回到 #replay-seek-host(隐藏)
- */
-function _syncReplaySeekSlot() {
-  if (!_replaySeekHost || !_replaySeekWrap) return;
-  const wrap = _replaySeekWrap;
-  const rid = _selectedRecordingId;
-  let targetSlot = null;
-  if (rid != null) {
-    targetSlot = document.querySelector(`.rec-seek-slot[data-rid="${rid}"]`);
-  }
-  if (targetSlot && wrap.parentElement !== targetSlot) {
-    targetSlot.appendChild(wrap);
-    targetSlot.hidden = false;
-  } else if (!targetSlot && wrap.parentElement !== _replaySeekHost) {
-    _replaySeekHost.appendChild(wrap);
-  }
-  document.querySelectorAll('.rec-seek-slot').forEach((slot) => {
-    slot.hidden = !(targetSlot && slot === targetSlot);
-  });
-}
-
-// ── 复现拖动条事件绑定 ──────────────────────────────────
-
-/** 初始化「录制 & 复现」模块:挂事件 + 初始渲染列表 */
-async function initRecorderAndReplay() {
-  try { await openRecorderDB(); }
-  catch (err) {
-    console.warn('[recorder] IndexedDB 不可用:', err);
-    if (recStartBtn) {
-      recStartBtn.textContent = 'IndexedDB 不可用';
-      recStartBtn.disabled = true;
-      recStartBtn.classList.remove('recorder-recording', 'recorder-replaying', 'recorder-idle', 'ros-active');
-      recStartBtn.classList.add('recorder-error');
-      recStartBtn.title = String(err && err.message || err);
-    }
-    [recStartBtn, replayStopBtn, recsClearBtn].forEach((b) => { if (b) b.disabled = true; });
-    return;
-  }
-  await renderRecordingsList();
-
-  if (recStartBtn) {
-    recStartBtn.addEventListener('click', async () => {
-      // 复现中不可触发录制
-      if (isReplaying()) {
-        showToast('正在复现中,请先停止复现再录制。', 'warn');
-        return;
-      }
-      // 录制中 → 结束录制;未录 → 启动录制
-      if (_activeRecordingId != null && isRecording(_activeRecordingId)) {
-        const rid = _activeRecordingId; _activeRecordingId = null;
-        // 先停定时器,避免与 stopRecording 的列表刷新竞争
-        stopRecStatusTimer();
-        try {
-          await stopRecording(rid);
-        } catch (err) {
-          console.error('[rec] 停止录制失败', err);
-        } finally {
-          applyRecorderUiState();
-          await renderRecordingsList();
-        }
-        return;
-      }
-      // 启动录制:要求 ROS 在线
-      if (getStatusSnapshot().connectionStatus !== 'online') {
-        showToast('请先连接 ROS 再开始录制。', 'warn');
-        applyRecorderUiState();
-        return;
-      }
-      try {
-        const meta = { rosUrl: getRosUrl(), modelId: currentModelId };
-        const { recordingId } = await startRecording(meta);
-        _activeRecordingId = recordingId;
-        _activeRecordingStartedAt = Date.now();
-        applyRecorderUiState();
-        // 启动录制状态定时刷新:让顶部状态栏秒/帧统计实时更新(否则只在此处刷新一次)
-        startRecStatusTimer();
-      } catch (err) {
-        console.error('[rec] 启动录制失败', err);
-        // 错误显示在按钮上(已合并状态胶囊)
-        if (recStartBtn) {
-          recStartBtn.textContent = '录制启动失败';
-          recStartBtn.disabled = true;
-          recStartBtn.classList.remove('recorder-recording', 'recorder-replaying', 'recorder-idle', 'ros-active');
-          recStartBtn.classList.add('recorder-error');
-          recStartBtn.title = String(err && err.message || err);
-        }
-      }
-    });
-  }
-  if (replayStopBtn) {
-    replayStopBtn.addEventListener('click', () => {
-      if (!isReplaying()) return;
-      stopReplay(false, true); // not silent, keepFrames=true
-      applyRecorderUiState();
-      renderRecordingsList();
-    });
-  }
-  if (recsClearBtn) {
-    recsClearBtn.addEventListener('click', async () => {
-      try {
-        const list = await listRecordings();
-        if (!list.length) { showToast('暂无可清理的记录。'); return; }
-        const ok = await confirmDialog({
-          title: '清空全部录制',
-          message: `共 ${list.length} 条记录,删除后不可恢复。`,
-          confirmText: '全部清空', danger: true,
-        });
-        if (!ok) return;
-        if (isReplaying()) stopReplay(false);
-        clearFrames();
-        _selectedRecordingId = null;
-        for (const r of list) {
-          await deleteRecording(r.id);
-          purgeAlarmRecordMeta(r.id);
-        }
-        await renderRecordingsList();
-        _syncReplaySeekSlot();
-        applyRecorderUiState();
-      } catch (err) {
-        console.error('[rec] 清空失败', err);
-      }
-    });
-  }
-
-  // ════════════════════════════════════════════════════════
-  // 复现拖动条:
-  //   - 复现中:input 实时 seek(不暂停播放),change 时恢复回写
-  //   - 视频监控模式(选中但未复现):input 时 seek-and-inject(暂停在该位置)
-  // ════════════════════════════════════════════════════════
-  if (replaySeekEl) {
-    replaySeekEl.addEventListener('input', (e) => {
-      const v = Number(e.target.value) || 0;
-      _replaySeeking = true;
-      if (isReplaying()) {
-        replaySeekTo(v);
-      } else if (hasFrames()) {
-        seekAndInject(v);
-      }
-      applyRecorderUiState({ elapsedMs: v });
-      applyRosUiState(getStatusSnapshot());
-    });
-    replaySeekEl.addEventListener('change', (e) => {
-      const v = Number(e.target.value) || 0;
-      if (isReplaying()) {
-        replaySeekTo(v);
-      } else if (hasFrames()) {
-        seekAndInject(v);
-      }
-      _replaySeeking = false;
-      applyRecorderUiState({ elapsedMs: v });
-      applyRosUiState(getStatusSnapshot());
-      renderRecordingsList();
-    });
-  }
-
-  // 录制流管道:连接 motor / imu 监听器,回调时如果在录制就 recordFrame
-  addMessageListener((payload) => {
-    const tsMs = payload?.at || performance.now();
-    if (_activeRecordingId == null) return;
-    recordFrame(_activeRecordingId, {
-      topic: MOTOR_STATE_TOPIC,
-      timestampMs: tsMs,
-      data: Array.isArray(payload?.data) ? payload.data : [],
-    });
-  });
-  addImuListener((payload) => {
-    const tsMs = payload?.at || performance.now();
-    if (_activeRecordingId == null) return;
-    recordFrame(_activeRecordingId, {
-      topic: IMU_STATE_TOPIC,
-      timestampMs: tsMs,
-      data: Array.isArray(payload?.data) ? payload.data : [],
-    });
-  });
-
-  // ════════════════════════════════════════════════════════
-  // 机器人通知事件 (/rl_real/notify):显示 toast + 通知历史面板
-  // (监听器已在模块顶层注册,这里仅保留注释占位)
-  // ════════════════════════════════════════════════════════
-  // 报警记录回放请求(alarm.js → 复用录制复现管道,自动切换到报警时的模型)
-  window.addEventListener('alarm-replay-request', async (evt) => {
-    const id = Number(evt.detail?.id);
-    if (!Number.isFinite(id)) return;
-    try {
-      if (isReplaying()) stopReplay(false);
-      if (_activeRecordingId != null) {
-        stopRecStatusTimer();
-        try { await stopRecording(_activeRecordingId); _activeRecordingId = null; applyRecorderUiState(); } catch (_) {}
-      }
-      const r = await getRecording(id);
-      if (r?.modelId && String(r.modelId) !== String(currentModelId)) {
-        try { await switchModel(String(r.modelId)); }
-        catch (err) { console.warn('[alarm] 报警回放自动切换模型失败,继续复现:', err); }
-      }
-      await selectRecording(id);
-      await startReplay(id, { startMs: 0 });
-      _selectedRecordingId = id;
-      applyRecorderUiState();
-      renderRecordingsList();
-      _syncReplaySeekSlot();
-    } catch (err) {
-      console.error('[alarm] 报警记录回放失败:', err);
-    }
-  });
-  // 复现事件 → 刷新 UI
-  /** 用于 complete 后 200ms 内取消「到点就立刻清 100%」的延迟 id */
-  let _replayCompleteClearTimer = 0;
-  addReplayListener((evt) => {
-    // 若 seek 后 / 进度 100% → 不节流,立即刷新(让 100% 立刻到位,拖动条立刻到位)
-    const forceRefresh = evt.seeked || (evt.type === 'progress' && evt.progress >= 1);
-    if (evt.type === 'progress' && !forceRefresh) {
-      const now = performance.now();
-      if (now - _lastRecStatusRefreshAt < REC_STATUS_REFRESH_MS) return;
-      _lastRecStatusRefreshAt = now;
-    }
-    if (evt.type === 'progress') {
-      applyRecorderUiState({ elapsedMs: evt.elapsedMs });
-      applyRosUiState(getStatusSnapshot());
-    } else if (evt.type === 'start') {
-      if (_replayCompleteClearTimer) { clearTimeout(_replayCompleteClearTimer); _replayCompleteClearTimer = 0; }
-      if (evt.recordingId != null) _selectedRecordingId = evt.recordingId;
-      applyRecorderUiState();
-      applyRosUiState(getStatusSnapshot());
-      renderRecordingsList();
-      _syncReplaySeekSlot();
-    } else if (evt.type === 'stop') {
-      if (_replayCompleteClearTimer) { clearTimeout(_replayCompleteClearTimer); _replayCompleteClearTimer = 0; }
-      applyRecorderUiState();
-      applyRosUiState(getStatusSnapshot());
-      renderRecordingsList();
-      _syncReplaySeekSlot();
-    } else if (evt.type === 'complete') {
-      if (_replayCompleteClearTimer) { clearTimeout(_replayCompleteClearTimer); _replayCompleteClearTimer = 0; }
-      applyRecorderUiState({ elapsedMs: evt.elapsedMs });
-      applyRosUiState(getStatusSnapshot());
-      _replayCompleteClearTimer = setTimeout(() => {
-        _replayCompleteClearTimer = 0;
-        stopReplay(true /* silent */, true /* keepFrames */);
-        // 保持拖动条在结束位置,注入终点帧
-        seekAndInject(evt.elapsedMs);
-        if (evt.recordingId != null) _selectedRecordingId = evt.recordingId;
-        applyRecorderUiState();
-        applyRosUiState(getStatusSnapshot());
-        renderRecordingsList();
-        _syncReplaySeekSlot();
-      }, 250);
-    } else {
-      applyRecorderUiState();
-    }
-  });
-}
-
-// ── 启动 ─────────────────────────────────────────────────
-
-// 初始化录制 & 复现(DB + 列表 + 事件)
-initRecorderAndReplay()
-  .catch((err) => console.warn('[recorder] init 失败:', err));
 
 // 底盘摇杆提前绑定:仿真画布关闭时,移动页签的摇杆/键盘仍可经
 // chassisCommandHook 向真机发布 /rl_real/cmd_vel(createJoystick 幂等,

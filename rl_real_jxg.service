@@ -1,0 +1,30 @@
+[Unit]
+Description=RL SAR JXG Robot Control (rl_real_JXG)
+After=network-online.target dev-ttyimu.device dev-ttycan4.device
+Wants=network-online.target dev-ttyimu.device dev-ttycan4.device
+
+[Service]
+Type=simple
+# 必须与 rosbridge（kickpi）同用户：FastDDS 走共享内存，跨用户无法通信
+User=kickpi
+SupplementaryGroups=input dialout
+ExecStart=/bin/bash /home/kickpi/rl_sar-w2_recovered/rl_real_jxg_autostart.sh
+WorkingDirectory=/home/kickpi/rl_sar-w2_recovered/cmake_build/bin
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# ===== 实时优先级提升（systemd 以 root 身份设置，绕过普通用户的 RLIMIT 限制）=====
+Nice=-10
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=80
+LimitRTPRIO=infinity
+LimitRTTIME=infinity
+# 只绑大核 4-7（A76 2208MHz）：小核 0-3 永远留给 sshd / NetworkManager / rosbridge /
+# USB 软中断等普通进程，避免 29 个 FIFO 线程占满全部核导致整机失联。
+# RT 最多用满 4/8 = 50% 根域带宽，RT throttler（95%）永远不会触发。
+CPUAffinity=4-7
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JXGw ROS 对接协议</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg2: #161b22;
+    --bg3: #1c2333;
+    --ink: #e6edf3;
+    --muted: #8b949e;
+    --rule: #30363d;
+    --accent: #58a6ff;
+    --accent2: #7ee787;
+    --warn: #f0883e;
+    --danger: #f85149;
+    --mono: 'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.7; }
+  .container { max-width: 960px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 28px; margin-bottom: 8px; }
+  h1 + p { color: var(--muted); margin-bottom: 32px; }
+  h2 { font-size: 22px; margin-top: 40px; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 2px solid var(--rule); }
+  h2 .num { color: var(--accent); margin-right: 8px; }
+  h3 { font-size: 17px; margin-top: 28px; margin-bottom: 8px; color: var(--accent2); }
+  h4 { font-size: 15px; margin-top: 18px; margin-bottom: 6px; }
+  p { margin-bottom: 10px; }
+  ul, ol { margin: 8px 0 12px 24px; }
+  li { margin-bottom: 4px; }
+  code { font-family: var(--mono); font-size: 13px; background: var(--bg3); padding: 1px 5px; border-radius: 4px; color: var(--accent2); }
+  pre { background: var(--bg2); border: 1px solid var(--rule); border-radius: 8px; padding: 16px; overflow-x: auto; margin: 12px 0; }
+  pre code { background: none; padding: 0; color: var(--ink); font-size: 13px; line-height: 1.5; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  th { text-align: left; background: var(--bg3); padding: 8px 10px; border: 1px solid var(--rule); font-weight: 600; color: var(--accent); }
+  td { padding: 8px 10px; border: 1px solid var(--rule); vertical-align: top; }
+  tr:nth-child(even) td { background: var(--bg2); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge-out { background: rgba(88,166,255,.15); color: var(--accent); border: 1px solid rgba(88,166,255,.35); }
+  .badge-in { background: rgba(126,231,135,.15); color: var(--accent2); border: 1px solid rgba(126,231,135,.35); }
+  .badge-freq { background: rgba(248,81,73,.12); color: var(--warn); border: 1px solid rgba(248,81,73,.3); }
+  .callout { background: var(--bg2); border-left: 3px solid var(--accent); padding: 12px 16px; margin: 12px 0; border-radius: 0 8px 8px 0; }
+  .callout-warn { border-left-color: var(--warn); }
+  .callout-danger { border-left-color: var(--danger); }
+  .seq-flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+  .seq-step { background: var(--bg3); border: 1px solid var(--rule); border-radius: 8px; padding: 8px 14px; font-size: 13px; }
+  .seq-step.received { border-color: var(--accent); }
+  .seq-step.executing { border-color: var(--warn); }
+  .seq-step.done { border-color: var(--accent2); }
+  .seq-step.rejected { border-color: var(--danger); }
+  .seq-arrow { color: var(--muted); font-size: 18px; }
+  .toc { background: var(--bg2); border: 1px solid var(--rule); border-radius: 8px; padding: 16px 24px; margin-bottom: 32px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .toc ul { list-style: none; margin: 0; }
+  .toc > ul > li { margin-bottom: 4px; }
+  .toc .sub { padding-left: 20px; color: var(--muted); }
+  .footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>JXGw 轮足机器人 — ROS 对接协议</h1>
+<p>版本: v7.6 (rl_real_JXG) · 传输层: WebSocket / ROS2 Topic 双通道 · 日期: 2026-10-12</p>
+
+<div class="toc">
+  <ul>
+    <li><a href="#overview">1. 协议总览</a></li>
+    <li><a href="#transport">2. 传输层</a></li>
+    <li><a href="#cmd-vel">3. 速度指令 (cmd_vel)</a> — <span class="sub">20Hz 持续发布 / 尾帧停发 / Web 独占</span></li>
+    <li><a href="#command">4. 行为命令 (command)</a> — <span class="sub">3 帧 Burst / 单发事件 / 生命周期</span></li>
+    <li><a href="#cmd-state">5. 命令状态生命周期 (cmd_state)</a> — <span class="sub">RECEIVED → EXECUTING → DONE/FAILED/REJECTED</span></li>
+    <li><a href="#telemetry">6. 遥测下行</a> — <span class="sub">motor_state / imu_state / pose2d / posture / heartbeat</span></li>
+    <li><a href="#notify">7. 通知与事件 (notify)</a></li>
+    <li><a href="#checks">8. 校验通道</a> — <span class="sub">check_stand / check_standing / zero_result / probe</span></li>
+    <li><a href="#aux">9. 辅助通道</a> — <span class="sub">SSH / 日志 / 系统管理</span></li>
+    <li><a href="#full-list">10. 完整通道一览表</a></li>
+  </ul>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="overview"><span class="num">1</span>协议总览</h2>
+
+<p>本协议定义外部上位机（浏览器 Web UI、ROS2 节点、CLI 工具）与机器人主控程序 <code>rl_real_JXG</code> 之间的全部通信通道。系统同时支持两种传输层：</p>
+
+<ul>
+  <li><strong>WebSocket</strong>（内嵌 <code>WebBridge</code>，端口 8088）：浏览器直连，JSON 帧格式 <code>{"type":"&lt;通道&gt;","data":&lt;payload&gt;}</code>，cmd_vel 使用扁平字段 <code>vx/vy/yaw</code></li>
+  <li><strong>ROS2 Topic</strong>（DDS）：ROS 节点间通信用 <code>std_msgs/String</code>（JSON payload）和 <code>geometry_msgs/Twist</code>（cmd_vel）</li>
+</ul>
+
+<p>两种传输层共用同一套 payload 格式和命令处理逻辑，后端在合成层统一出口（<code>EmitCommandState</code>）双发 ROS Topic + WebSocket。</p>
+
+<div class="callout">
+  <strong>设计原则：</strong>
+  <ul>
+    <li><strong>Web 独占仲裁</strong>：Web 非零速度获取独占锁（1.0s 窗口），期间 ROS cmd_vel 被丢弃。松手断联超时自动归零，随后 ROS 接管。</li>
+    <li><strong>命令串行</strong>：同一时刻仅跟踪一条 pending 命令，新命令取代旧跟踪。</li>
+    <li><strong>抗丢包 Burst</strong>：常规 FSM 命令连发 3 帧（间隔 500ms，总计 1.0s），后端用 <code>seq + 1.5s 窗口</code> 去重。</li>
+    <li><strong>断联归零</strong>：cmd_vel 超过 0.5s 无新帧 → 自动归零停车（Web 与 ROS 共用一份计时器）。</li>
+  </ul>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="transport"><span class="num">2</span>传输层</h2>
+
+<h3>2.1 WebSocket 连接</h3>
+
+<table>
+  <tr><th>项目</th><th>说明</th></tr>
+  <tr><td>URL</td><td><code>ws(s)://&lt;host&gt;:8088/ws</code>（浏览器同源时 <code>ws(s)://&lt;page_host&gt;/ws</code>）</td></tr>
+  <tr><td>鉴权</td><td>URL 拼接 <code>?token=&lt;localStorage 值&gt;</code></td></tr>
+  <tr><td>帧格式</td><td><code>{"type":"&lt;通道名&gt;","data":&lt;payload&gt;}</code>（cmd_vel 例外，使用扁平 <code>vx/vy/yaw</code>）</td></tr>
+  <tr><td>重连</td><td>指数退避 1s → 1.5s → 2.25s → … 封顶 5s，非主动断开时自动重连</td></tr>
+</table>
+
+<h3>2.2 ROS2 Topic 映射</h3>
+
+<table>
+  <tr><th>通道</th><th>ROS Topic</th><th>消息类型</th><th>方向</th></tr>
+  <tr><td>cmd_vel (ROS)</td><td><code>/rl_real/cmd_vel</code></td><td><code>geometry_msgs/Twist</code></td><td><span class="badge badge-out">上位机→机器人</span></td></tr>
+  <tr><td>cmd_vel (Web 独占)</td><td><code>/rl_real/web_cmd_vel</code></td><td><code>geometry_msgs/Twist</code></td><td><span class="badge badge-out">上位机→机器人</span></td></tr>
+  <tr><td>command</td><td><code>/rl_real/command</code></td><td><code>std_msgs/String</code></td><td><span class="badge badge-out">上位机→机器人</span></td></tr>
+  <tr><td>feedback</td><td><code>/rl_real/feedback</code></td><td><code>std_msgs/String</code></td><td><span class="badge badge-in">机器人→上位机</span></td></tr>
+  <tr><td>motor_state</td><td><code>/rl_real/motor_state</code></td><td><code>std_msgs/Float32MultiArray</code></td><td><span class="badge badge-in">机器人→上位机</span></td></tr>
+  <tr><td>imu_state</td><td><code>/rl_real/imu_state</code></td><td><code>std_msgs/Float32MultiArray</code></td><td><span class="badge badge-in">机器人→上位机</span></td></tr>
+  <tr><td>pose2d</td><td><code>/rl_real/pose2d</code></td><td><code>std_msgs/Float32MultiArray</code></td><td><span class="badge badge-in">机器人→上位机</span></td></tr>
+  <tr><td>posture</td><td><code>/rl_real/posture</code></td><td><code>std_msgs/String</code> (JSON)</td><td><span class="badge badge-in">机器人→上位机</span></td></tr>
+  <tr><td>cmd_state</td><td><code>/rl_real/cmd_state</code></td><td><code>std_msgs/String</code> (JSON)</td><td><span class="badge badge-in">机器人→上位机</span></td></tr>
+  <tr><td>heartbeat</td><td><code>/rl_real/heartbeat</code></td><td><code>std_msgs/String</code> (JSON)</td><td><span class="badge badge-in">机器人→上位机</span></td></tr>
+  <tr><td>notify</td><td><code>/rl_real/notify</code></td><td><code>std_msgs/String</code> (JSON)</td><td><span class="badge badge-in">机器人→上位机</span></td></tr>
+  <tr><td>check_stand</td><td><code>/rl_real/check_stand</code></td><td><code>std_msgs/String</code></td><td><span class="badge badge-out">上位机→机器人</span></td></tr>
+  <tr><td>check_stand_result</td><td><code>/rl_real/check_stand_result</code></td><td><code>std_msgs/String</code> (JSON)</td><td><span class="badge badge-in">机器人→上位机</span></td></tr>
+  <tr><td>check_standing</td><td><code>/rl_real/check_standing</code></td><td><code>std_msgs/String</code></td><td><span class="badge badge-out">上位机→机器人</span></td></tr>
+  <tr><td>check_standing_result</td><td><code>/rl_real/check_standing_result</code></td><td><code>std_msgs/String</code> (JSON)</td><td><span class="badge badge-in">机器人→上位机</span></td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="cmd-vel"><span class="num">3</span>速度指令 (cmd_vel)</h2>
+
+<h3>3.1 帧格式</h3>
+
+<p>WebSocket 帧使用扁平字段（非标准 <code>data</code> 包裹）：</p>
+<pre><code>{
+  "type": "cmd_vel",
+  "vx": 0.50,     // 线速度 X (m/s)，前进为正
+  "vy": 0.00,     // 线速度 Y (m/s)，左移为正
+  "yaw": 0.30     // 角速度 Z (rad/s)，左转为正
+}</code></pre>
+
+<p>ROS2 话题使用标准 <code>geometry_msgs/Twist</code>：<code>linear.x = vx</code>, <code>linear.y = vy</code>, <code>angular.z = yaw</code>。</p>
+
+<h3>3.2 发送节奏：20Hz 持续发布 + 尾帧停发</h3>
+
+<table>
+  <tr><th>阶段</th><th>行为</th><th>频率</th></tr>
+  <tr><td>非零速度</td><td>启动 20Hz keep-alive 定时器，每 50ms 发一帧</td><td><span class="badge badge-freq">20Hz</span></td></tr>
+  <tr><td>归零（非零→零跳变）</td><td>追加 5 帧零速度尾帧后停止定时器（避免真机收到一次零后又收到非零 keepalive）</td><td><span class="badge badge-freq">20Hz × 5</span></td></tr>
+  <tr><td>已是零且尾帧发完</td><td>停止定时器，不再发帧（省 CPU）</td><td>—</td></tr>
+  <tr><td>断联超时</td><td>后端 0.5s 无新帧 → 自动归零（Web 与 ROS 共用计时器）</td><td>—</td></tr>
+</table>
+
+<h3>3.3 死区</h3>
+
+<p>所有速度分量在写入前经过死区过滤：<code>|v| &lt; 0.05 → 0</code>。消除指令源零位漂移，Web 与 ROS 两链路共用。</p>
+
+<h3>3.4 Web 独占仲裁</h3>
+
+<div class="callout callout-warn">
+  <strong>Web 独占机制：</strong>Web 链路的非零速度获取独占锁（保持窗口 1.0s），期间 ROS <code>/rl_real/cmd_vel</code> 帧被丢弃并回复 <code>"cmd_vel ignored: web exclusive active"</code>。Web 松手后独占锁自然过期，ROS 恢复接管。零速尾帧不续期独占，但仍写入以保证停车。
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="command"><span class="num">4</span>行为命令 (command)</h2>
+
+<h3>4.1 帧格式</h3>
+
+<pre><code>{"type": "command", "data": "getup"}</code></pre>
+
+<p><code>data</code> 为命令字符串，见下表。带序号（seq&gt;0）的命令（如 ws_demo CLI）享受去重保护。</p>
+
+<h3>4.2 命令列表</h3>
+
+<table>
+  <tr><th>命令</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>getup</code></td><td>Burst 3 帧</td><td>站立（需通过卧姿+探针门禁）</td></tr>
+  <tr><td><code>getdown</code></td><td>Burst 3 帧</td><td>趴下/被动</td></tr>
+  <tr><td><code>passive</code></td><td>Burst 3 帧</td><td>释放关节（kp=0）</td></tr>
+  <tr><td><code>locomotion</code></td><td>Burst 3 帧</td><td>进入强化学习（需站姿门禁通过）</td></tr>
+  <tr><td><code>rl_block</code> / <code>block</code></td><td>Burst 3 帧</td><td>退出强化学习，原地保持 SafeHold</td></tr>
+  <tr><td><code>vel_stop</code></td><td>Burst 3 帧</td><td>速度清零</td></tr>
+  <tr><td><code>zero</code></td><td>单发</td><td>全部 16 台电机置零（仅 Passive 允许）</td></tr>
+  <tr><td><code>zero_motor &lt;0-15&gt;</code></td><td>单发</td><td>单台电机置零</td></tr>
+  <tr><td><code>zero_motors 0,2,7</code></td><td>单发</td><td>批量置零（逗号分隔，后端四腿并行+逐台确认+重发）</td></tr>
+  <tr><td><code>check_standing</code></td><td>单发</td><td>站姿期望值校验</td></tr>
+  <tr><td><code>check_stand</code> / <code>check</code></td><td>Burst 3 帧</td><td>卧姿校验（电机零位 + IMU 状态）</td></tr>
+  <tr><td><code>probe_motors</code></td><td>单发</td><td>16 台电机可控性探针（约 2~6s）</td></tr>
+  <tr><td><code>probe &lt;id&gt;</code> / <code>probe_motor &lt;id&gt;</code></td><td>单发</td><td>单台探针（0-15，支持 m 前缀）</td></tr>
+  <tr><td><code>probe_leg FL/FR/RL/RR</code></td><td>单发</td><td>分腿探针</td></tr>
+  <tr><td><code>status</code></td><td>Burst 3 帧</td><td>查询当前状态</td></tr>
+  <tr><td><code>posture</code></td><td>Burst 3 帧</td><td>请求姿态帧</td></tr>
+  <tr><td><code>sys_reboot</code></td><td>单发</td><td>重启主控</td></tr>
+  <tr><td><code>sys_poweroff</code></td><td>单发</td><td>关机</td></tr>
+</table>
+
+<h3>4.3 Burst 机制（"开始发送 → 发送中 → 发送结束"）</h3>
+
+<p>常规 FSM 命令采用 3 帧 Burst 发送，对齐旧 CLI <code>--times 3 --rate 2</code>：</p>
+
+<div class="seq-flow">
+  <div class="seq-step received">第 1 帧（立即发）</div>
+  <span class="seq-arrow">→</span>
+  <span>500ms 间隔</span>
+  <span class="seq-arrow">→</span>
+  <div class="seq-step executing">第 2 帧</div>
+  <span class="seq-arrow">→</span>
+  <span>500ms 间隔</span>
+  <span class="seq-arrow">→</span>
+  <div class="seq-step done">第 3 帧 → Burst 结束</div>
+</div>
+
+<ul>
+  <li>总持续 1.0s（3 帧 × 500ms 间隔）</li>
+  <li>同一时刻新命令进来会 <strong>cancel 上一个未发完的 Burst</strong>（避免叠发）</li>
+  <li>单发命令（zero / check_standing / probe_*）不进入 Burst，只发 1 帧</li>
+  <li>带序号命令去重：<code>seq + 1.5s 窗口</code> 内同 seq 重复帧丢弃</li>
+</ul>
+
+<div class="callout">
+  <strong>设计原因：</strong>FSM 状态切换命令（站立/趴下/进 RL）若丢一帧会导致机器人卡在中间态。3 帧 Burst 以 500ms 间隔抗丢包，后端去重窗口 1.5s 容忍 Burst 内同 seq 重复。置零类命令不 Burst 是因为执行耗时约 2s，叠发会打断正在进行的逐台写零流程。
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="cmd-state"><span class="num">5</span>命令状态生命周期 (cmd_state)</h2>
+
+<p>这是你提到的"开始发送 → 发送中 → 发送结束"的核心协议。每条命令从受理到终态，后端通过 <code>cmd_state</code> 通道逐步回报状态。</p>
+
+<h3>5.1 状态码</h3>
+
+<table>
+  <tr><th>code</th><th>phase</th><th>含义</th><th>触发时机</th></tr>
+  <tr><td>0</td><td><code>RECEIVED</code></td><td>已收到</td><td>命令受理瞬间（去重通过后立即发）</td></tr>
+  <tr><td>1</td><td><code>EXECUTING</code></td><td>执行中</td><td>FSM 开始切换/动作开始</td></tr>
+  <tr><td>2</td><td><code>DONE</code></td><td>完成</td><td>进入目标态且稳态 + 满足最小执行时长</td></tr>
+  <tr><td>3</td><td><code>FAILED</code></td><td>超时失败</td><td>超时未进入目标态</td></tr>
+  <tr><td>4</td><td><code>REJECTED</code></td><td>拒绝</td><td>门禁未通过（CAN/站姿/卧姿/探针）</td></tr>
+</table>
+
+<h3>5.2 帧格式</h3>
+
+<pre><code>{
+  "type": "cmd_state",
+  "data": {
+    "seq": 1,                    // 命令序号（ws_demo 带序号 >0；ROS/Web 页面 seq=0）
+    "cmd": "getup",              // 原始命令字符串
+    "code": 1,                   // 状态码 0-4
+    "phase": "EXECUTING",        // 状态名（冗余字段，方便解析）
+    "target": "RLFSMStateGetUp", // 目标 FSM 状态名（无目标时为 null）
+    "state": "RLFSMStatePassive", // 当前 FSM 状态名
+    "elapsed_ms": 340            // 从受理到本帧耗时（毫秒）
+  }
+}</code></pre>
+
+<h3>5.3 生命周期流程</h3>
+
+<div class="seq-flow">
+  <div class="seq-step received">RECEIVED (code=0)<br><small>命令受理</small></div>
+  <span class="seq-arrow">→</span>
+  <div class="seq-step executing">EXECUTING (code=1)<br><small>FSM 切换开始</small></div>
+  <span class="seq-arrow">→</span>
+  <div class="seq-step done">DONE (code=2)<br><small>到位+稳态</small></div>
+</div>
+
+<div class="seq-flow">
+  <span>或：</span>
+  <div class="seq-step rejected">REJECTED (code=4)<br><small>门禁未通过</small></div>
+  <span class="seq-arrow">→</span>
+  <span>（无后续帧）</span>
+</div>
+
+<div class="seq-flow">
+  <span>或：</span>
+  <div class="seq-step received">RECEIVED</div>
+  <span class="seq-arrow">→</span>
+  <div class="seq-step executing">EXECUTING</div>
+  <span class="seq-arrow">→</span>
+  <div class="seq-step rejected">FAILED (code=3)<br><small>超时</small></div>
+</div>
+
+<h3>5.4 跟踪机制 (TrackFsmCommand)</h3>
+
+<p>后端为每条命令创建 <code>PendingCommand</code> 跟踪对象，在控制环（200Hz）中以 <code>UpdatePendingCommand</code> 轮询：</p>
+<ul>
+  <li><strong>EXECUTING</strong>：首次轮询时发（<code>executing_sent</code> 标志防重）</li>
+  <li><strong>DONE</strong>：当前 FSM 状态 == 目标态 && <code>behavior_settled</code> && 经过 <code>min_sec</code> 最小时长</li>
+  <li><strong>FAILED</strong>：超过 <code>timeout_sec</code> 未到位</li>
+  <li><strong>REJECTED</strong>：门禁检查未通过，立即发（不经 EXECUTING）</li>
+</ul>
+
+<div class="callout callout-warn">
+  <strong>seq=0 命令同样跟踪：</strong>ROS 话题和 Web 页面的命令 seq=0，合成层靠 posture/settled 边沿产出 DONE/FAILED。SafeHold 状态下进行中的命令标记为 FAILED。
+</div>
+
+<h3>5.5 各命令的 cmd_state 生命周期路径</h3>
+
+<div class="callout callout-danger">
+  <strong>关键：</strong>所有命令无条件发 <code>RECEIVED</code>（code=0）。但此后并非每条命令都走完整 <code>RECEIVED → EXECUTING → DONE/FAILED/REJECTED</code> 链——按命令类型分为 5 类：
+</div>
+
+<h4>A 类：完整生命周期（RECEIVED → EXECUTING → DONE / FAILED / REJECTED）</h4>
+<p>通过 <code>TrackFsmCommand</code> 创建 <code>PendingCommand</code> 跟踪对象，在 200Hz 控制环中轮询产出终态：</p>
+<table>
+  <tr><th>命令</th><th>目标态</th><th>超时</th><th>说明</th></tr>
+  <tr><td><code>getup</code></td><td>RLFSMStateGetUp</td><td>6.0s</td><td>站立插值完成</td></tr>
+  <tr><td><code>getdown</code></td><td>RLFSMStatePassive</td><td>8.0s</td><td>趴下插值 2s + 余量后回 passive</td></tr>
+  <tr><td><code>locomotion</code></td><td>RLFSMStateRLLocomotion</td><td>5.0s</td><td>进入强化学习</td></tr>
+  <tr><td><code>passive</code></td><td>RLFSMStatePassive</td><td>5.0s</td><td>释放关节</td></tr>
+</table>
+<p>这 4 条命令才有 <code>FAILED</code>（超时未到位）和 <code>REJECTED</code>（门禁未通过）。</p>
+
+<h4>B 类：同步两步（RECEIVED → EXECUTING → DONE / REJECTED）</h4>
+<p>同步执行，立即出结果，无 FAILED（不跟踪超时）：</p>
+<table>
+  <tr><th>命令</th><th>终态条件</th></tr>
+  <tr><td><code>check_stand</code> / <code>check</code></td><td>卧姿校验通过 → DONE；未通过 → REJECTED</td></tr>
+  <tr><td><code>check_standing</code></td><td>站姿校验通过 → DONE；未通过 → REJECTED</td></tr>
+</table>
+
+<h4>C 类：异步无终态（RECEIVED → EXECUTING，无 DONE/FAILED/REJECTED）</h4>
+<div class="callout callout-warn">
+  <strong>注意：以下命令只发 RECEIVED + EXECUTING 两帧，</strong>之后异步线程通过 <code>notify</code> 通道逐台推送结果，<strong>cmd_state 通道不会发终态</strong>。上层需监听 <code>notify</code> 的 <code>type:"probe"</code> 消息判断完成。
+</div>
+<table>
+  <tr><th>命令</th><th>结果通道</th><th>说明</th></tr>
+  <tr><td><code>probe_motors</code> / <code>probe</code></td><td>notify (probe: start/result × 16/done)</td><td>16 台并行探针，约 2s</td></tr>
+  <tr><td><code>probe_motor &lt;id&gt;</code> / <code>probe &lt;id&gt;</code></td><td>notify (probe: single)</td><td>单台探针（无效 ID → REJECTED）</td></tr>
+  <tr><td><code>probe_leg FL/FR/RL/RR</code></td><td>notify (probe: legdone)</td><td>分腿探针</td></tr>
+  <tr><td><code>sys_reboot</code></td><td>—（进程死亡）</td><td>1s 后系统重启，来不及发终态</td></tr>
+  <tr><td><code>sys_poweroff</code></td><td>—（进程死亡）</td><td>1s 后关机，来不及发终态</td></tr>
+</table>
+
+<h4>D 类：立即完成（RECEIVED → DONE，跳过 EXECUTING）</h4>
+<p>同步执行且必定成功（无 FAILED/REJECTED 路径）：</p>
+<table>
+  <tr><th>命令</th><th>说明</th></tr>
+  <tr><td><code>zero</code> / <code>zero_all</code></td><td>16 台全部置零（仅 Passive 允许，否则 REJECTED）</td></tr>
+  <tr><td><code>zero_motor &lt;0-15&gt;</code></td><td>单台置零（无效 ID → REJECTED）</td></tr>
+  <tr><td><code>zero_motors 0,2,7</code></td><td>批量置零（解析错误 → REJECTED）</td></tr>
+  <tr><td><code>rl_block</code> / <code>block</code></td><td>退出 RL → SafeHold</td></tr>
+  <tr><td><code>vel_stop</code> / <code>hold</code></td><td>速度清零</td></tr>
+  <tr><td><code>posture</code> / <code>pose</code></td><td>即时广播姿态帧</td></tr>
+  <tr><td><code>status</code> / <code>feedback</code></td><td>查询状态</td></tr>
+  <tr><td><code>nav_on</code> / <code>nav_off</code></td><td>导航模式开关</td></tr>
+  <tr><td><code>imu_on</code> / <code>imu_off</code></td><td>IMU 数据流开关</td></tr>
+  <tr><td><code>quit</code> / <code>exit</code></td><td>退出程序</td></tr>
+</table>
+
+<h4>E 类：仅拒绝（RECEIVED → REJECTED）</h4>
+<table>
+  <tr><th>命令</th><th>拒绝原因</th></tr>
+  <tr><td><code>zero</code>（非 Passive 态）</td><td>安全门禁：仅 Passive 允许置零</td></tr>
+  <tr><td><code>zero_motor &lt;无效ID&gt;</code></td><td>ID 越界（0-15）</td></tr>
+  <tr><td><code>zero_motors &lt;解析错误&gt;</code></td><td>参数格式不合法</td></tr>
+  <tr><td><code>probe_motor &lt;无效ID&gt;</code></td><td>ID 越界（0-15）</td></tr>
+  <tr><td>未知命令</td><td>不在命令表内</td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="telemetry"><span class="num">6</span>遥测下行</h2>
+
+<h3>6.1 motor_state — 电机遥测</h3>
+<p><span class="badge badge-freq">200Hz</span> <span class="badge badge-in">机器人→上位机</span></p>
+<p>每台电机 11 个 float，按配置序号连续排列（兼容旧 9/10 float）：</p>
+
+<table>
+  <tr><th>偏移</th><th>字段</th><th>单位</th></tr>
+  <tr><td>0</td><td>idx</td><td>电机序号</td></tr>
+  <tr><td>1</td><td>tgt_pos</td><td>rad</td></tr>
+  <tr><td>2</td><td>real_pos</td><td>rad</td></tr>
+  <tr><td>3</td><td>tgt_vel</td><td>rad/s</td></tr>
+  <tr><td>4</td><td>real_vel</td><td>rad/s</td></tr>
+  <tr><td>5</td><td>tgt_tau</td><td>N·m</td></tr>
+  <tr><td>6</td><td>real_tau</td><td>N·m</td></tr>
+  <tr><td>7</td><td>kp</td><td>—</td></tr>
+  <tr><td>8</td><td>kd</td><td>—</td></tr>
+  <tr><td>9</td><td>temp_c</td><td>℃</td></tr>
+  <tr><td>10</td><td>feedback_age_ms</td><td>ms（CAN 反馈新鲜度）</td></tr>
+</table>
+
+<pre><code>{"type": "motor_state", "data": [0, 0.01, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 35.0, 2, 1, ...]}</code></pre>
+
+<h3>6.2 imu_state — IMU 遥测</h3>
+<p><span class="badge badge-freq">200Hz</span> <span class="badge badge-in">机器人→上位机</span></p>
+<p>19 个 float：</p>
+
+<table>
+  <tr><th>偏移</th><th>字段</th></tr>
+  <tr><td>0-3</td><td>四元数 QUAT_W/X/Y/Z</td></tr>
+  <tr><td>4-6</td><td>欧拉角 ROLL/PITCH/YAW (rad)</td></tr>
+  <tr><td>7-9</td><td>加速度 ACC_X/Y/Z (m/s²)</td></tr>
+  <tr><td>10-12</td><td>角速度 GYRO_X/Y/Z (rad/s)</td></tr>
+  <tr><td>13-15</td><td>位置 POS_N/E/D (m)</td></tr>
+  <tr><td>16-18</td><td>速度 VEL_X/Y/Z (m/s)</td></tr>
+</table>
+
+<h3>6.3 pose2d — 里程计位姿</h3>
+<p><span class="badge badge-freq">200Hz</span> <span class="badge badge-in">机器人→上位机</span></p>
+<p>7 个 float：<code>x, y, z, yaw, vel_x, vel_y, yaw_rate</code></p>
+
+<h3>6.4 posture — 姿态帧</h3>
+<p><span class="badge badge-freq">8Hz</span> <span class="badge badge-in">机器人→上位机</span></p>
+<p>包含 FSM 状态、门禁实时判定（站姿/卧姿/探针/CAN），JSON 格式：</p>
+<pre><code>{
+  "type": "posture",
+  "data": {
+    "posture": "standing",          // lying/standing/locomotion/transition/unknown
+    "fsm": "RLFSMStateGetUp",       // FSM 原始状态名
+    "settled": true,                // 当前态是否稳态（插值完成/策略接管）
+    "motors_ready": true,           // 电机零位检查通过
+    "can_ready": true,              // 16 电机 CAN 反馈均在 500ms 内
+    "stand_ready": true,            // 站姿门禁（12 腿关节 ±0.30rad 内且静止）
+    "stand_err": 0.012,             // 最差偏差 (rad)
+    "stand_joint": 3,               // 最差关节序号
+    "stand_reason": "",             // 未通过原因
+    "lie_done": true,               // 卧姿校验已执行
+    "lie_ready": true,              // 卧姿校验通过（|q|≤1.0rad）
+    "probe_done": true,             // 探针已执行
+    "probe_ready": true,            // 探针全部通过
+    "gamepad_override": false
+  }
+}</code></pre>
+
+<h3>6.5 heartbeat — 心跳</h3>
+<p><span class="badge badge-freq">2Hz</span> <span class="badge badge-in">机器人→上位机</span></p>
+<pre><code>{
+  "type": "heartbeat",
+  "data": {
+    "seq": 42,                // 心跳序号（递增）
+    "state": "RLFSMStateRLLocomotion",  // 当前 FSM 状态
+    "nav": false,             // 导航模式
+    "uptime_ms": 186000,      // 运行时长
+    "active_seq": 0           // 在途命令序号（0=无在途命令）
+  }
+}</code></pre>
+
+<h3>6.6 feedback — 指令应答</h3>
+<p><span class="badge badge-in">机器人→上位机</span> 不定频，命令处理时发</p>
+<pre><code>{"type": "feedback", "data": "cmd_vel accepted"}</code></pre>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="notify"><span class="num">7</span>通知与事件 (notify)</h2>
+
+<p><span class="badge badge-in">机器人→上位机</span> 事件驱动</p>
+
+<p>机器人主动推送的事件通知（错误/警告/信息/探针结果等），带去重/重试机制。上位机收到后应回复 <code>notify_ack</code>。</p>
+
+<pre><code>{
+  "type": "notify",
+  "data": {
+    "id": 5,                    // 通知序号（递增）
+    "type": "error",            // info/warning/error/success/probe/note
+    "content": "CAN 反馈超时，已立即退出强化学习",
+    "timestamp": 1286.523       // 单调时钟秒
+  }
+}</code></pre>
+
+<h4>notify_ack（上位机→机器人）</h4>
+<pre><code>{"type": "notify_ack", "data": "{\"id\":5,\"ok\":true}"}</code></pre>
+
+<p>未 ack 的通知会重试推送（约 2Hz），直到 ack 或超时清除。</p>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="checks"><span class="num">8</span>校验通道</h2>
+
+<h3>8.1 check_stand — 卧姿校验</h3>
+<p>上位机发 <code>{"type":"check_stand","data":"check"}</code>，机器人执行电机零位+IMU 检查后回报：</p>
+<pre><code>{"type": "check_stand_result", "data": "{\"at_stand\":true,\"joints_ready\":true,...}"}</code></pre>
+<p>结果通过后解锁起立门禁。趴下后记录作废，每次起立前需重新校验。</p>
+
+<h3>8.2 check_standing — 站姿期望值校验</h3>
+<p>上位机发 <code>{"type":"check_stand","data":"check_standing"}</code>，机器人检查 12 腿关节是否在站立期望构型容差内（±0.30rad），回报：</p>
+<pre><code>{
+  "type": "check_standing_result",
+  "data": {
+    "at_stand": true,
+    "joints_ready": true,
+    "imu_ready": true,
+    "can_ready": true,
+    "worst_err": 0.012,
+    "worst_joint": 3,
+    "tol": 0.3,
+    "reason": "",
+    "posture": { ... }            // 内嵌完整 posture 帧
+  }
+}</code></pre>
+
+<h3>8.3 zero_result — 置零结果</h3>
+<p>置零命令（zero / zero_motor / zero_motors）执行后，通过 feedback 通道回报结构化结果：</p>
+<pre><code>{"type": "feedback", "data": "zero_result {\"zeroed\":[0,1,2,3],\"failed\":[7]}"}</code></pre>
+
+<h3>8.4 探针 (probe)</h3>
+<p>探针结果通过 notify 通道推送，type 为 <code>probe</code>：</p>
+<pre><code>{"type": "notify", "data": {"id":1,"type":"probe","content":"result m0 FL_hip_joint ok"}}</code></pre>
+<p>探针完成后：<code>"done 2"</code>（失败台数），<code>"single m0 FL_hip_joint ok"</code>（单台），<code>"legdone 0 0"</code>（分腿完成）。</p>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="aux"><span class="num">9</span>辅助通道</h2>
+
+<table>
+  <tr><th>通道</th><th>方向</th><th>说明</th></tr>
+  <tr><td><code>imu_stream</code></td><td><span class="badge badge-out">→机器人</span></td><td><code>{"type":"imu_stream","data":true}</code> 开关 IMU 数据流</td></tr>
+  <tr><td><code>log_subscribe</code></td><td><span class="badge badge-out">→机器人</span></td><td>订阅实时程序日志（可带 N 行历史）</td></tr>
+  <tr><td><code>log_unsubscribe</code></td><td><span class="badge badge-out">→机器人</span></td><td>取消日志订阅</td></tr>
+  <tr><td><code>log</code></td><td><span class="badge badge-in">机器人→</span></td><td>实时程序日志一行</td></tr>
+  <tr><td><code>log_status</code></td><td><span class="badge badge-in">机器人→</span></td><td>日志流状态</td></tr>
+  <tr><td><code>ssh_start/ssh_data/ssh_resize/ssh_stop</code></td><td><span class="badge badge-out">→机器人</span></td><td>WebSSH 终端会话</td></tr>
+  <tr><td><code>ssh_ready/ssh_exit/ssh_data</code></td><td><span class="badge badge-in">机器人→</span></td><td>WebSSH 会话生命周期与 PTY 输出</td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="full-list"><span class="num">10</span>完整通道一览表</h2>
+
+<table>
+  <tr><th>#</th><th>通道</th><th>方向</th><th>频率</th><th>payload</th></tr>
+  <tr><td>1</td><td>cmd_vel</td><td><span class="badge badge-out">→</span></td><td>20Hz</td><td>扁平 vx/vy/yaw</td></tr>
+  <tr><td>2</td><td>command</td><td><span class="badge badge-out">→</span></td><td>事件/Burst</td><td>命令字符串</td></tr>
+  <tr><td>3</td><td>check_stand</td><td><span class="badge badge-out">→</span></td><td>事件</td><td>"check" / "check_standing"</td></tr>
+  <tr><td>4</td><td>imu_stream</td><td><span class="badge badge-out">→</span></td><td>事件</td><td>boolean</td></tr>
+  <tr><td>5</td><td>notify_ack</td><td><span class="badge badge-out">→</span></td><td>事件</td><td>JSON {id, ok}</td></tr>
+  <tr><td>6</td><td>log_subscribe/unsubscribe</td><td><span class="badge badge-out">→</span></td><td>事件</td><td>N 行历史</td></tr>
+  <tr><td>7</td><td>ssh_start/data/resize/stop</td><td><span class="badge badge-out">→</span></td><td>事件</td><td>WebSSH</td></tr>
+  <tr><td>8</td><td>motor_state</td><td><span class="badge badge-in">←</span></td><td>200Hz</td><td>float[] × 11/电机</td></tr>
+  <tr><td>9</td><td>imu_state</td><td><span class="badge badge-in">←</span></td><td>200Hz</td><td>float[19]</td></tr>
+  <tr><td>10</td><td>pose2d</td><td><span class="badge badge-in">←</span></td><td>200Hz</td><td>float[7]</td></tr>
+  <tr><td>11</td><td>posture</td><td><span class="badge badge-in">←</span></td><td>8Hz</td><td>JSON 姿态帧</td></tr>
+  <tr><td>12</td><td>cmd_state</td><td><span class="badge badge-in">←</span></td><td>事件</td><td>JSON 命令生命周期</td></tr>
+  <tr><td>13</td><td>heartbeat</td><td><span class="badge badge-in">←</span></td><td>2Hz</td><td>JSON 心跳</td></tr>
+  <tr><td>14</td><td>feedback</td><td><span class="badge badge-in">←</span></td><td>事件</td><td>string 应答</td></tr>
+  <tr><td>15</td><td>notify</td><td><span class="badge badge-in">←</span></td><td>事件</td><td>JSON 通知</td></tr>
+  <tr><td>16</td><td>check_stand_result</td><td><span class="badge badge-in">←</span></td><td>事件</td><td>JSON</td></tr>
+  <tr><td>17</td><td>check_standing_result</td><td><span class="badge badge-in">←</span></td><td>事件</td><td>JSON</td></tr>
+  <tr><td>18</td><td>log / log_status</td><td><span class="badge badge-in">←</span></td><td>流</td><td>string</td></tr>
+  <tr><td>19</td><td>ssh_ready/exit/data</td><td><span class="badge badge-in">←</span></td><td>事件</td><td>WebSSH</td></tr>
+</table>
+
+<div class="callout callout-danger">
+  <strong>安全门禁速查：</strong>
+  <ul>
+    <li><strong>起立 (getup)</strong>：需 CAN 正常 + 探针通过 + 卧姿校验通过</li>
+    <li><strong>进入 RL (locomotion)</strong>：需 CAN 正常 + 站姿门禁通过（±0.30rad 且静止）</li>
+    <li><strong>置零 (zero)</strong>：仅 Passive（趴下/kp=0）允许，否则 REJECTED</li>
+    <li><strong>CAN 断线</strong>：起立/行走/趴下指令全部拒绝；RL 中自动退入 SafeHold</li>
+  </ul>
+</div>
+
+<div class="footer">
+  <p>生成自 rl_real_JXG.cpp / ros-bridge.js / rl_real_JXG.hpp 源码 · 2026-10-12 · rl_sar v7.6</p>
+</div>
+
+</div>
+</body>
+</html>

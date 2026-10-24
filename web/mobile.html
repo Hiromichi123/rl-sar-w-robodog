@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#111827" />
-    <title>网页机器人仿真 · 移动版</title>
+    <title>机器人本体控制单元（JJJS-MCC-M1） · 移动版</title>
     <script>
       // 移动版页面:桌面环境或宽屏(>768px)打开时自动跳回桌面版 index.html
       // 跳回条件:非移动设备(无移动 UA 且非触屏 且窗口宽度 > 768px)
@@ -15,20 +15,26 @@
         var touch  = navigator.maxTouchPoints > 1 && matchMedia('(pointer: coarse)').matches;
         var narrow = window.innerWidth <= 768;
         var mobile = /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent) || touch || narrow;
-        if (!mobile) location.replace('./index.html');
+        if (!mobile) location.replace('./index.html?v=2026102001');
       })();
     </script>
-    <link rel="stylesheet" href="./css/style.css?v=1030" />
-    <link rel="stylesheet" href="./css/style-mobile.css?v=1040" />
+    <link rel="stylesheet" href="./css/style.css?v=1090" />
+    <link rel="manifest" href="./manifest.json" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="stylesheet" href="./vendor/xterm/xterm.css?v=530" />
+    <link rel="stylesheet" href="./css/style-mobile.css?v=1076" />
     <!-- 关键结构规则内联兜底:外链 CSS 若被手机端缓存污染,此块保证
          ① 移动控制页 hidden 时真正隐藏(旧版裸 ID 规则会压过 .control-view[hidden],
             导致切页签后摇杆区/快捷命令条叠在其它页签内容上)
-         ② 页内次序:Twist 卡 → 姿态快捷条 → 摇杆区 -->
+         ② 页内次序:Twist 读数 → 当前姿态 → 摇杆区 -->
     <style>
       #movement-control-view:not([hidden]) { display: flex; flex-direction: column; }
-      .twist-readout { order: -2; }
-      .quick-behavior-bar { order: -1; }
+      .twist-readout { order: -2; }               /* ① Twist 速度读数 */
+      /* ② 摇杆区(速度上限/锁定/双摇杆):首屏即可驾驶 */
       #movement-quadruped-chassis { order: -1; }
+      /* ③ 当前姿态栏 order:-1 由 style-mobile.css 设置,DOM 位置更靠前,
+            与摇杆区同组时排在摇杆之上 */
     </style>
     <script type="importmap">
       {
@@ -46,7 +52,7 @@
   </head>
   <body class="sim-off">
     <main id="app">
-      <section class="viewport" aria-label="网页机器人仿真视图">
+      <section class="viewport" aria-label="机器人本体控制单元视图">
         <canvas id="scene"></canvas>
         <div id="loading-overlay" class="loading-overlay">
           <div class="loading-spinner"></div>
@@ -57,12 +63,12 @@
           <div class="sim-disabled-card">
             <div class="sim-disabled-icon">🧊</div>
             <div class="sim-disabled-title">3D 仿真未启动</div>
-            <div class="sim-disabled-desc">模型网格(约 40MB)不会加载。ROS 连接、数据看板、实时曲线、录制与真机遥控均可正常使用。</div>
+            <div class="sim-disabled-desc">模型网格(约 40MB)不会加载。ROS 连接、数据看板、实时曲线与真机遥控均可正常使用。</div>
             <button id="sim-enable-btn" class="ros-btn sim-enable-btn" type="button">▶ 启动 3D 仿真</button>
           </div>
         </div>
         <div class="topbar">
-          <div class="brand">网页机器人仿真</div>
+          <div class="brand">机器人本体控制单元 <span class="brand-sub">JJJS-MCC-M1</span></div>
           <div id="load-status" class="load-status">读取机器人模型...</div>
           <span id="ros-status" class="ros-status ros-offline" title="ROS 连接状态">未连接</span>
         </div>
@@ -81,7 +87,6 @@
             </select>
           </label>
           <div class="view-buttons">
-            <button id="recorder-start-btn" class="ros-btn recorder-start" type="button" disabled>● 开始录制</button>
             <button id="view-home" title="恢复默认视角">⌂</button>
             <button id="view-front" title="切换正视视角">正</button>
             <button id="view-side" title="切换侧视视角">侧</button>
@@ -90,7 +95,6 @@
           <div class="scene-options">
             <label class="annotation-toggle"><input id="annotations-toggle" type="checkbox"><span>注释</span></label>
             <label class="annotation-toggle"><input id="com-toggle" type="checkbox"><span>重心</span></label>
-            <button id="notify-btn" class="notify-btn" type="button" title="机器人通知">🔔<span id="notify-badge" class="notify-badge"></span></button>
           </div>
         </div>
         <div id="notify-panel" class="notify-panel" hidden>
@@ -107,54 +111,22 @@
       <aside class="control-panel" id="control-panel">
         <div class="control-tabs" role="tablist" aria-label="控制方式">
           <button id="movement-tab" class="active" role="tab" aria-selected="true" aria-controls="movement-control-view" data-control-tab="movement">移动控制</button>
-          <button id="ros-tab" role="tab" aria-selected="false" aria-controls="ros-control-view" data-control-tab="ros">ROS 指令</button>
-          <button id="zero-tab" role="tab" aria-selected="false" aria-controls="zero-control-view" data-control-tab="zero">置零</button>
-          <button id="dashboard-tab" role="tab" aria-selected="false" aria-controls="dashboard-control-view" data-control-tab="dashboard">数据看板</button>
           <button id="sim-tab" role="tab" aria-selected="false" aria-controls="sim-control-view" data-control-tab="sim">仿真</button>
+          <button id="ros-tab" role="tab" aria-selected="false" aria-controls="ros-control-view" data-control-tab="ros">ROS 指令</button>
+          <button id="joint-tab" role="tab" aria-selected="false" aria-controls="joint-control-view" data-control-tab="joint">关节管理</button>
+          <button id="dashboard-tab" role="tab" aria-selected="false" aria-controls="dashboard-control-view" data-control-tab="dashboard">数据看板</button>
+          <button id="models-tab" role="tab" aria-selected="false" aria-controls="models-control-view" data-control-tab="models">模型管理</button>
+          <button id="rc-tab" role="tab" aria-selected="false" aria-controls="rc-control-view" data-control-tab="rc">遥控学习</button>
+          <button id="battery-tab" role="tab" aria-selected="false" aria-controls="battery-control-view" data-control-tab="battery">电池</button>
+          <button id="about-tab" role="tab" aria-selected="false" aria-controls="about-control-view" data-control-tab="about">关于</button>
         </div>
-        <!-- 移动端「仿真」页签:顶部为仿真工具条(模型/视角/注释/重心/位置源,
-             由页尾内联脚本从顶部场景工具条搬入),下方为 3D 舞台;
-             canvas/遮罩/注释层由 scene.js/内联脚本放入 #sim-stage -->
-        <div id="sim-control-view" class="control-view sim-control-view" role="tabpanel" aria-labelledby="sim-tab" hidden>
+        <!-- 3D 画布容器(无对应页签,仅承载 scene.js 的 canvas;默认隐藏) -->
+        <div id="sim-control-view" class="control-view sim-control-view" hidden>
           <div id="sim-toolbar" class="sim-toolbar" aria-label="仿真工具"></div>
           <div id="sim-stage" class="sim-stage"></div>
         </div>
         <!-- 移动端「ROS 指令」页签:真机行为命令区由页尾内联脚本从移动控制页搬入 -->
         <div id="ros-control-view" class="control-view" role="tabpanel" aria-labelledby="ros-tab" hidden>
-        </div>
-        <!-- 数据录制与复现页面:录制记录列表 -->
-        <div id="config-control-view" class="control-view" role="tabpanel" aria-labelledby="config-tab" hidden>
-          <!-- 录制 & 复现(IndexedDB 存储) -->
-          <section class="cartesian-section config-section" aria-label="录制记录与复现列表">
-            <div class="section-heading">
-              <h2>录制记录</h2>
-              <p class="config-hint">录制按钮已在页签上方。下方列表展示已保存到 IndexedDB 的所有录制,可点击复现/删除。复现时会自动切换到录制时的机器人模型。录制不依赖网络,断网后也可本地回放。</p>
-            </div>
-            <div class="recorder-control">
-              <button id="replay-stop-btn" class="ros-btn replay-stop" type="button" disabled>■ 停止复现</button>
-              <button id="recordings-clear-btn" class="ros-btn recordings-clear" type="button" title="清空所有录制记录">清空全部</button>
-            </div>
-            <!-- 复现拖动条 host:平时隐藏,在复现某条记录时其内容被移动到对应行的 .rec-seek-slot -->
-            <div id="replay-seek-host" hidden aria-hidden="true">
-              <div class="replay-seek-wrap" aria-label="复现进度">
-                <span id="replay-cur-time" class="replay-time replay-time-cur">00:00</span>
-                <input id="replay-seek" type="range" class="replay-seek" min="0" max="0" step="10" value="0" disabled aria-label="拖动复现进度" />
-                <span id="replay-total-time" class="replay-time replay-time-total">00:00</span>
-              </div>
-            </div>
-            <div class="recordings-list-wrap">
-              <div class="recordings-list-header">
-                <span class="rec-name-col">记录</span>
-                <span class="rec-model-col">模型</span>
-                <span class="rec-meta-col">时间</span>
-                <span class="rec-frames-col">帧数</span>
-                <span class="rec-actions-col">操作</span>
-              </div>
-              <ul id="recordings-list" class="recordings-list">
-                <li class="rec-empty">尚无录制记录 — 连接 ROS 后点击「开始录制」即可</li>
-              </ul>
-            </div>
-          </section>
         </div>
         <!-- 参数报警配置页:阈值规则 + 当前报警列表(规则持久化到 localStorage) -->
         <div id="alarm-control-view" class="control-view" role="tabpanel" aria-labelledby="alarm-tab" hidden>
@@ -175,7 +147,7 @@
             </ul>
           </section>
         </div>
-        <div id="joint-control-view" class="control-view" hidden>
+        <div id="scene-controls-host" class="control-view" hidden>
           <div id="controls" class="controls" aria-live="polite"></div>
         </div>
         <div id="cartesian-control-view" class="control-view" role="tabpanel" aria-labelledby="cartesian-tab" hidden>
@@ -310,21 +282,29 @@
         </div>
         <div id="movement-control-view" class="control-view" role="tabpanel" aria-labelledby="movement-tab" hidden>
           <div class="twist-readout" aria-label="最近一次 cmd_vel">
-            <span class="twist-title">Twist /rl_real/cmd_vel</span>
-            <span class="twist-vals">
-              <span class="twist-v"><span>x</span><output id="twist-lin-x">0.00</output>m/s</span>
-              <span class="twist-v"><span>y</span><output id="twist-lin-y">0.00</output>m/s</span>
-              <span class="twist-v"><span>z</span><output id="twist-lin-z">0.00</output>m/s</span>
-              <span class="twist-v"><span>ω</span><output id="twist-ang-z">0.00</output>rad/s</span>
-            </span>
-            <span id="twist-count" class="twist-count">0 帧</span>
+            <div class="twist-head">
+              <span class="twist-title">Twist /rl_real/cmd_vel</span>
+              <span id="twist-count" class="twist-count">0 帧</span>
+            </div>
+            <div class="twist-vals">
+              <label class="twist-v" title="点击启用/禁用该方向输出"><input type="checkbox" data-axis="x" checked><span class="twist-v-top"><span class="twist-axis">x</span><span class="twist-unit">m/s</span></span><output id="twist-lin-x">0.00</output><span class="twist-gauge"><i class="twist-gauge-fill" id="twist-gauge-x"></i></span></label>
+              <label class="twist-v" title="点击启用/禁用该方向输出"><input type="checkbox" data-axis="y"><span class="twist-v-top"><span class="twist-axis">y</span><span class="twist-unit">m/s</span></span><output id="twist-lin-y">0.00</output><span class="twist-gauge"><i class="twist-gauge-fill" id="twist-gauge-y"></i></span></label>
+              <label class="twist-v" title="点击启用/禁用该方向输出"><input type="checkbox" data-axis="z"><span class="twist-v-top"><span class="twist-axis">z</span><span class="twist-unit">m/s</span></span><output id="twist-lin-z">0.00</output><span class="twist-gauge"><i class="twist-gauge-fill" id="twist-gauge-z"></i></span></label>
+              <label class="twist-v" title="点击启用/禁用该方向输出"><input type="checkbox" data-axis="omega" checked><span class="twist-v-top"><span class="twist-axis">ω</span><span class="twist-unit">rad/s</span></span><output id="twist-ang-z">0.00</output><span class="twist-gauge"><i class="twist-gauge-fill" id="twist-gauge-w"></i></span></label>
+            </div>
           </div>
-          <!-- 常用姿态命令快捷条(与「ROS 指令」页同一套发布逻辑;ROS 离线时自动禁用) -->
-          <div class="quick-behavior-bar" aria-label="常用姿态命令">
-            <button type="button" class="behavior-pill is-check check-stand-quick" title="检查电机零位和 IMU 状态(不触发站立)">检查站立</button>
-            <button type="button" class="behavior-pill is-stand" data-behavior="getup">站立</button>
-            <button type="button" class="behavior-pill is-crouch" data-behavior="getdown">趴下</button>
-            <button type="button" class="behavior-pill is-loco" data-behavior="locomotion">强化学习</button>
+          <!-- 当前姿态显示:后端 8Hz posture 帧驱动(趴下/站立/强化学习/切换中) -->
+          <div class="posture-bar" aria-label="当前机器人姿态">
+            <div class="posture-head">
+              <span class="posture-bar-label">当前姿态</span>
+              <span class="posture-fsm" title="FSM 当前状态名"></span>
+              <!-- BMS 剩余电量(充放静状态已融合:充电显 ⚡、放/静显 🔋):
+                   由电池页 bms_data 帧驱动(蓝牙后台常驻,切到本页即可见) -->
+              <span id="move-batt-soc" class="move-batt-soc" title="BMS 剩余电量">🔋 --%</span>
+            </div>
+            <div class="posture-pills">
+              <span class="posture-pill posture-unknown" title="FSM 状态机原始状态">— 未知 —</span>
+            </div>
           </div>
           <section class="ros-movement-section">
             <div class="section-heading">
@@ -335,19 +315,14 @@
               <button type="button" class="behavior-pill is-stand" data-behavior="getup">站立 · getup</button>
               <button type="button" class="behavior-pill is-crouch" data-behavior="getdown">趴下 · getdown</button>
               <button type="button" class="behavior-pill is-passive" data-behavior="passive">被动 · passive</button>
-              <button type="button" class="behavior-pill is-loco" data-behavior="locomotion">进入 RL · locomotion</button>
+              <button type="button" class="behavior-pill is-loco" data-behavior="locomotion" title="进入强化学习行走前自动做站立校验,未站稳则拒绝">进入强化学习</button>
+              <button type="button" class="behavior-pill is-block" data-behavior="rl_block" title="立即切断强化学习输出并原地保持(SafeHold),需 getup 恢复">退出强化学习</button>
+              <button type="button" class="behavior-pill is-check" data-behavior="probe_motors" title="逐个给 16 台电机发小角度偏移检测是否可控(约3~6s,失败自动重测),结果仅供参考不自动恢复">探针检测 · probe</button>
               <button type="button" class="behavior-pill" data-behavior="vel_stop">速度清零 · vel_stop</button>
               <button type="button" class="behavior-pill" data-behavior="zero">电机置零 · zero</button>
-              <button type="button" class="behavior-pill is-check" id="check-stand-btn" title="检查电机零位和 IMU 状态(不触发站立)">检查站立</button>
-              <div id="briefing-scenes" class="briefing-scenes" title="点选多个场景(按点选顺序连播),再点一次取消">
-                <button type="button" class="scene-chip" data-scene="elevator"><span class="chip-order"></span>电梯</button>
-                <button type="button" class="scene-chip" data-scene="forklift"><span class="chip-order"></span>叉车</button>
-                <button type="button" class="scene-chip" data-scene="lifting"><span class="chip-order"></span>吊装</button>
-                <button type="button" class="scene-chip" data-scene="warehouse"><span class="chip-order"></span>仓库</button>
-                <button type="button" class="scene-chip" data-scene="height"><span class="chip-order"></span>高处</button>
-              </div>
-              <button type="button" class="behavior-pill is-brief" id="briefing-play-btn" title="语音播报所选作业交底场景(/rl_briefing/play)">▶ 作业交底</button>
-              <button type="button" class="behavior-pill is-stopbrief" id="briefing-stop-btn" title="打断当前语音播报">■ 停止播报</button>
+              <button type="button" class="behavior-pill is-check check-stand-btn" title="卧姿校验(趴下→站立前):检查电机零位和 IMU 状态(不触发站立)。结果作为起立门禁记录,趴下后作废,每次起立前需重新校验">卧姿校验</button>
+              <button type="button" class="behavior-pill is-checkstanding check-standing-btn" title="站姿校验(进入强化学习前):12 个腿关节是否站在期望站姿且静止(不触发动作)">站姿校验</button>
+              <button type="button" class="behavior-pill" id="ros-can-init" title="CAN 初始化:重跑 can_setup.sh,按 USB 序列号重命名 can0~4 并重新 UP。初始化期间 CAN 瞬断约 1~2 秒,请在趴姿/吊装状态下执行">CAN 初始化</button>
             </div>
           </section>
           <div id="movement-quadruped-chassis" hidden>
@@ -370,6 +345,37 @@
                   <span class="joy-gear-unit">rad/s</span>
                 </div>
               </div>
+              <div class="joy-lock-bar">
+                <button type="button" id="joy-cruise-lock" class="joy-lock-btn" aria-pressed="false"
+                  title="速度锁定(定速巡航,左杆):开启瞬间保持当前 X/Y 速度,之后左杆松手不回正、不衰减;关闭立即停车并恢复松手回中。右杆 ω/Z 不受影响">
+                  <span class="joy-lock-dot" aria-hidden="true"></span><span class="joy-lock-text">速度锁定：关</span>
+                </button>
+                <button type="button" id="joy-cruise-lock-z" class="joy-lock-btn" aria-pressed="false"
+                  title="转向锁定(定速巡航,右杆):开启瞬间保持当前 ω 角速度与 Z 高度,之后右杆松手不回正、不衰减;关闭立即转向归零、Z 回站姿并恢复松手回中。左杆 vx/vy 不受影响">
+                  <span class="joy-lock-dot" aria-hidden="true"></span><span class="joy-lock-text">转向锁定：关</span>
+                </button>
+              </div>
+              <!-- 一键安全起立:卧姿校验 → 探针检测 → 起立 → 站姿确认 → 进入强化学习,任一环节失败立即中止。
+                   5 段进度条融合在按钮底边,由后端 safe_getup notify 帧驱动 -->
+              <div class="safe-getup-bar">
+                <div class="safe-getup-actions">
+                  <button type="button" class="safe-getup-btn"
+                    title="一键安全起立并进入强化学习:依次执行卧姿校验、16台电机探针、起立,站稳后自动做站姿校验确认,通过后自动进入强化学习;任一环节不通过立即中止,不会带隐患起立">
+                    <span class="safe-getup-icon" aria-hidden="true">🛡</span><span class="safe-getup-label">安全起立</span>
+                    <span class="safe-getup-track" aria-hidden="true">
+                      <i class="sg-seg" data-step="lie" title="①卧姿校验"></i>
+                      <i class="sg-seg" data-step="probe" title="②探针检测"></i>
+                      <i class="sg-seg" data-step="getup" title="③起立"></i>
+                      <i class="sg-seg" data-step="stand" title="④站姿确认"></i>
+                      <i class="sg-seg" data-step="rl" title="⑤进入强化学习"></i>
+                    </span>
+                  </button>
+                  <button type="button" class="safe-getdown-btn"
+                    title="趴下(getdown):立即退出强化学习并收腿趴下。安全起立流程运行中禁用">
+                    <span aria-hidden="true">⬇</span><span>趴下</span>
+                  </button>
+                </div>
+              </div>
               <div class="joystick-dual">
                 <div class="joy-col">
                   <span class="joy-col-label">移动 X/Y</span>
@@ -388,18 +394,55 @@
           </div>
         </div>
         <!-- 数据看板:电机 + IMU 数字一览(单页) -->
+        <!-- 移动端「模型」页签:策略模型查看与切换(复用 sysadmin.js 模型页逻辑,
+             结构与 PC index.html models-control-view 一致;移动端不提供新建/终端) -->
+        <div id="models-control-view" class="control-view" role="tabpanel" aria-labelledby="models-tab" hidden>
+          <section class="sys-section">
+            <!-- 隐藏终端挂载点: initSysAdmin 以 #sys-term-mount 存在为初始化门禁,
+                 移动端不提供终端 UI, 仅放置空容器使模型页逻辑生效(无终端按钮,不会建会话) -->
+            <div id="sys-term-mount" hidden></div>
+            <div class="section-heading">
+              <span>主控模型管理</span>
+              <span id="sys-model-status" class="sys-ftp-status">加载中…</span>
+            </div>
+            <div class="sys-power-bar">
+              <button type="button" class="ros-btn" id="sys-model-refresh">刷新</button>
+              <input type="search" id="sys-model-search" class="sys-ftp-search" placeholder="🔍 搜索模型配置/文件名" autocomplete="off" />
+              <span class="sys-hint">「启用」改写 config.yaml 的 model_name,无需重启服务:先趴下(退出强化学习),再重新进入强化学习即热加载新模型;HR 日志文件名随所选模型自动切换。</span>
+            </div>
+            <div id="sys-model-body" class="sys-model-body"></div>
+            <div id="sys-model-pager" class="sys-ftp-pager" hidden>
+              <button type="button" class="ros-btn" id="sys-model-page-prev">‹ 上一页</button>
+              <div id="sys-model-page-nums" class="sys-ftp-page-nums"></div>
+              <button type="button" class="ros-btn" id="sys-model-page-next">下一页 ›</button>
+            </div>
+          </section>
+        </div>
         <div id="dashboard-control-view" class="control-view" role="tabpanel" aria-labelledby="dashboard-tab" hidden>
           <!-- ① 电机数据:全部受控关节的 实际/目标/偏差/速度 -->
           <section class="dashboard-section">
             <div class="section-heading">
               <h2>电机数据</h2>
             </div>
+            <!-- 视图切换(仅四足模型显示):
+                 按字段 = 4×4 网格,行 FL/FR/RL/RR、列 髋/大腿/小腿/轮,一次只显示一个
+                          指标的全 16 台电机值,便于比对「相同项」;
+                 按电机 = 每台一张卡片,看单机全貌。选择持久化到 localStorage。 -->
+            <div class="dash-view-bar" id="dash-view-bar" hidden>
+              <div class="dash-view-switch" role="group" aria-label="看板视图">
+                <button type="button" class="dash-view-btn is-active" data-dash-view="field">按字段</button>
+                <button type="button" class="dash-view-btn" data-dash-view="motor">按电机</button>
+              </div>
+              <div class="dash-field-chips" id="dash-field-chips" role="group" aria-label="指标选择"></div>
+            </div>
             <div class="dash-scroll">
               <div class="dashboard-motor-head" aria-hidden="true">
-                <span>序号</span><span>关节</span><span title="真机 CAN 总线 ID：髋关节=4、大腿=3、小腿=2、足端轮=1，悬停各行可查看 MasterID">CAN ID</span><span>目标位置</span><span>实际位置</span><span>目标速度</span><span>实际速度</span><span>目标力矩</span><span>实际力矩</span><span title="位置比例增益（刚度）：跟踪目标位置的“弹簧硬度”，越大关节越硬">kp 刚度</span><span title="速度微分增益（阻尼）：抑制振动，越大运动越平稳、响应变钝">kd 阻尼</span><span title="电机温度（°C）">温度 °C</span>
+                <span>序号</span><span>关节</span><span title="真机 CAN 总线 ID：髋关节=4、大腿=3、小腿=2、足端轮=1，悬停各行可查看 MasterID">CAN ID</span><span>目标位置</span><span>实际位置</span><span>目标速度</span><span>实际速度</span><span>目标力矩</span><span>实际力矩</span><span title="位置比例增益（刚度）：跟踪目标位置的“弹簧硬度”，越大关节越硬">kp 刚度</span><span title="速度微分增益（阻尼）：抑制振动，越大运动越平稳、响应变钝">kd 阻尼</span><span title="电机温度（°C）">温度 °C</span><span title="距上次收到该电机有效反馈的时间：正常毫秒级；≥0.5s 橙色、≥1s 红色视为断线；“等待”表示从未解析到该电机反馈">更新</span>
               </div>
               <div id="dashboard-motor-grid" class="dashboard-motor-grid"></div>
             </div>
+            <!-- 按字段视图:同一指标的全机 16 格矩阵(值由 dashboard.js 填充),与置零矩阵同构 -->
+            <div id="dashboard-field-grid" class="dashboard-field-grid" hidden></div>
           </section>
           <!-- ② IMU 数据:姿态/四元数/加速度/角速度/位置/速度 共 19 项 -->
           <section class="dashboard-section">
@@ -531,11 +574,16 @@
             </div>
           </section>
         </div>
-        <!-- 置零:单电机选择矩阵 + 单电机/全部置零(危险操作,仅趴下/被动态使用) -->
-        <div id="zero-control-view" class="control-view" role="tabpanel" aria-labelledby="zero-tab" hidden>
+        <!-- 关节管理:置零(电机零点校准) + 电机可控性探针 -->
+        <div id="joint-control-view" class="control-view" role="tabpanel" aria-labelledby="joint-tab" hidden>
+          <!-- 置零:单电机选择矩阵 + 单电机/全部置零(危险操作,仅趴下/被动态使用) -->
           <section class="zero-section">
+            <div class="section-heading">
+              <h2>电机置零</h2>
+              <span class="zero-red-hint">⚠ 危险操作:仅趴下/被动状态时使用</span>
+            </div>
             <div class="zero-warning">
-              ⚠ 危险操作:置零会把电机<b>当前位置</b>写为零点!仅当机器狗处于<b>趴下 / 被动状态</b>、且关节已位于期望零位时使用,误操作将导致姿态异常。格内数值为实时位置(rad),<b class="zero-red-hint">红色 = 偏离零位 &gt; 0.1 rad</b>。
+              格内数值为实时位置(rad),<b class="zero-red-hint">红色 = 偏离零位 &gt; 0.1 rad</b>。
             </div>
             <div class="zero-grid-header" aria-hidden="true">
               <span>髋关节</span><span>大腿</span><span>小腿</span><span>足端轮</span>
@@ -543,14 +591,29 @@
             <div id="zero-motor-grid" class="zero-motor-grid" aria-label="电机选择矩阵(4 腿 × 4 关节,可多选)"></div>
             <div class="zero-footer">
               <span id="zero-selected-label" class="zero-selected-label">未选择电机</span>
-              <button type="button" id="zero-select-red-btn" class="behavior-pill zero-select-red-btn" data-ui-only title="一键选中所有偏离零位超过 0.1 rad 的电机">全选标红电机</button>
-              <button type="button" id="zero-motor-btn" class="behavior-pill zero-motor-btn" disabled title="对选中的电机逐个执行置零(二次确认)">置零选中电机</button>
-              <button type="button" class="behavior-pill zero-all-btn" data-behavior="zero" title="遍历 16 个电机全部置零">全部置零 · zero</button>
+              <button type="button" id="zero-select-red-btn" class="behavior-pill zero-select-red-btn" data-ui-only title="一键选中所有偏离零位超过 0.1 rad 的电机">全选标红</button>
+              <button type="button" id="zero-motor-btn" class="behavior-pill zero-motor-btn" disabled title="对选中的电机逐个执行置零(二次确认)">置零选中</button>
+              <button type="button" class="behavior-pill zero-all-btn" data-behavior="zero" title="遍历 16 个电机全部置零">全部置零</button>
+            </div>
+          </section>
+          <!-- 电机探针:已合并到上方置零矩阵,每个格子自带探针按钮+状态 -->
+          <section class="cartesian-section">
+            <div class="section-heading">
+              <h2>电机可控性探针</h2>
+            </div>
+            <div class="probe-toolbar">
+              <button type="button" id="probe-selected-btn" class="behavior-pill is-check" disabled title="对选中的电机逐个执行探针">探针选中</button>
+              <button type="button" id="probe-all-btn" class="behavior-pill is-check" data-behavior="probe_motors">全部</button>
+              <button type="button" class="behavior-pill is-check probe-leg-btn" data-leg="0">FL</button>
+              <button type="button" class="behavior-pill is-check probe-leg-btn" data-leg="1">FR</button>
+              <button type="button" class="behavior-pill is-check probe-leg-btn" data-leg="2">RL</button>
+              <button type="button" class="behavior-pill is-check probe-leg-btn" data-leg="3">RR</button>
+              <span id="probe-status" class="probe-status">待机</span>
             </div>
           </section>
         </div>
         <!-- ROS 话题调试:接收区(顶部全宽) + 话题列表/发送区(左右布局) -->
-        <div id="rosdebug-control-view" class="control-view" role="tabpanel" aria-labelledby="rosdebug-tab">
+        <div id="rosdebug-control-view" class="control-view" role="tabpanel" aria-labelledby="rosdebug-tab" hidden>
           <!-- ① 接收区(顶部全宽) -->
           <section class="cartesian-section">
             <div class="section-heading">
@@ -610,15 +673,117 @@
               aria-label="发送消息 JSON"></textarea>
           </section>
         </div>
+        <!-- 遥控学习页签:CH340 串口学习/克隆(后端 web_server 独占串口,与控制环隔离) -->
+        <div id="rc-control-view" class="control-view" role="tabpanel" aria-labelledby="rc-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>遥控学习 / 克隆</span>
+              <button type="button" class="ros-btn" id="rc-refresh" style="font-size:12px;padding:2px 10px">⟳ 刷新</button>
+            </div>
+            <!-- 设备状态 -->
+            <div class="sys-power-bar">
+              <span id="rc-dev-status" class="ros-status-pill ros-offline">设备状态</span>
+              <span id="rc-dev-path" style="font-size:12px;color:#8fa3b8"></span>
+              <span id="rc-learn-state" class="ros-status-pill">未学习</span>
+            </div>
+            <!-- 命名、学习、发送与保存 -->
+            <div class="sys-power-bar">
+              <input type="text" id="rc-name-input" class="sys-ftp-path" placeholder="名称(留空用 hex)" style="max-width:160px" />
+              <input type="text" id="rc-pending-hex" class="sys-ftp-path" placeholder="待保存 hex(可编辑)" style="max-width:130px;font-family:monospace" spellcheck="false" />
+              <button type="button" class="ros-btn" id="rc-learn-btn">学习</button>
+              <button type="button" class="ros-btn" id="rc-test-btn">发送</button>
+              <button type="button" class="ros-btn" id="rc-save-btn">保存</button>
+              <button type="button" class="ros-btn" id="rc-clear-btn">清除</button>
+            </div>
+            <p class="config-hint">开启学习后触发其它遥控器;捕获到的有效帧自动填入「待保存 hex」,可点「发送」验证,再点「保存」落盘(名称留空时默认用该 hex);「清除」清空名称与待保存 hex。</p>
+            <!-- 已学码列表 -->
+            <div class="section-heading">
+              <span>已学码</span>
+              <span id="rc-list-count" style="font-size:12px;color:#8fa3b8">0 条</span>
+            </div>
+            <div class="sys-svclist-wrap">
+              <table class="sys-ftp-table" id="rc-table">
+                <thead><tr><th>ID</th><th>名称</th><th>HEX</th><th>时间</th><th>操作</th></tr></thead>
+                <tbody id="rc-table-body"><tr><td colspan="5" style="color:#8fa3b8">暂无已学码</td></tr></tbody>
+              </table>
+            </div>
+            <div id="rc-result" style="font-size:12px;padding:4px 2px;color:#8fa3b8" hidden></div>
+          </section>
+        </div>
+        <!-- 电池页签:通过 web_server 蓝牙 BLE 线程读取 BMS(后台常驻连接) -->
+        <div id="battery-control-view" class="control-view" role="tabpanel" aria-labelledby="battery-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>电池 BMS</span>
+              <span id="battery-status" class="ros-status-pill ros-offline">未连接</span>
+              <button type="button" class="ros-btn" id="battery-power" style="font-size:12px;padding:2px 10px">蓝牙:开</button>
+              <button type="button" class="ros-btn" id="battery-refresh" style="font-size:12px;padding:2px 10px">⟳ 刷新</button>
+            </div>
+            <p class="config-hint">通过蓝牙读取 BMS 数据。蓝牙连接默认后台常驻,可用「蓝牙」开关手动启动/关闭;打开本页签即可查看。</p>
+            <div id="battery-metrics" class="bat-grid"><div class="bat-empty">暂无数据</div></div>
+            <div class="section-heading">
+              <span>单体电压</span>
+              <span id="battery-cell-summary" style="font-size:12px;color:#8fa3b8"></span>
+            </div>
+            <div id="battery-cells" class="bat-cells"><div class="bat-empty">暂无单体电压</div></div>
+          </section>
+        </div>
+        <!-- 关于页签:主控/Web 服务版本与构建信息(便于区分 vN 部署) -->
+        <div id="about-control-view" class="control-view" role="tabpanel" aria-labelledby="about-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>版本信息</span>
+              <span id="about-build-match" class="about-match" hidden></span>
+              <button type="button" class="ros-btn" id="about-refresh" style="font-size:12px;padding:2px 10px">⟳ 刷新</button>
+            </div>
+            <p class="config-hint">主控程序版本经 WebSocket 命令实时查询(主控离线时仅显示 Web 服务信息);构建时间相同的两个进程属于同一次编译。</p>
+            <div class="about-grid">
+              <div class="about-card about-card-rl">
+                <div class="about-card-head">
+                  <span class="about-ico">🤖</span>
+                  <div class="about-card-names">
+                    <div class="about-card-title">主控程序</div>
+                    <div class="about-card-sub">rl_real_JXG</div>
+                  </div>
+                  <span class="about-pill" id="about-rl-status">--</span>
+                </div>
+                <div class="about-ver" id="about-rl-version">--</div>
+                <div class="about-rows">
+                  <div class="about-row"><span>🔢 构建号</span><b id="about-rl-build">--</b></div>
+                  <div class="about-row"><span>🕒 构建时间</span><b id="about-rl-built">--</b></div>
+                  <div class="about-row"><span>📁 运行目录</span><b id="about-rl-cwd">--</b></div>
+                </div>
+              </div>
+              <div class="about-card about-card-web">
+                <div class="about-card-head">
+                  <span class="about-ico">🌐</span>
+                  <div class="about-card-names">
+                    <div class="about-card-title">Web 服务</div>
+                    <div class="about-card-sub">jxg-web</div>
+                  </div>
+                  <span class="about-pill" id="about-web-proc">--</span>
+                </div>
+                <div class="about-ver" id="about-web-version">--</div>
+                <div class="about-rows">
+                  <div class="about-row"><span>🔢 构建号</span><b id="about-web-build">--</b></div>
+                  <div class="about-row"><span>🕒 构建时间</span><b id="about-web-built">--</b></div>
+                  <div class="about-row"><span>📁 运行目录</span><b id="about-web-cwd">--</b></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
       </aside>
     </main>
-    <script type="module" src="./js/main.js?v=1071"></script>
+    <script src="./vendor/xterm/xterm.js?v=530"></script>
+    <script src="./vendor/xterm/fit-addon.js?v=080"></script>
+    <script type="module" src="./js/main.js?v=2026102103"></script>
     <script>
-      // 移动版布局:① 顶栏(品牌/ROS 状态)与 ② 场景工具栏(ws 地址/连接/录制/
+      // 移动版布局:① 顶栏(品牌/ROS 状态)与 ② 场景工具栏(ws 地址/连接/
       // 仿真开关)整体下移,并入控制区 —— 非仿真页签画布隐藏后,状态与连接控件
       // 仍可见可控。③ 3D 画布及遮罩从顶部 .viewport 搬入「仿真」页签的舞台
       // #sim-stage;仿真专属功能按钮(位置源/4 个视角/注释/重心)从顶部
-      // 场景工具条搬入页签内工具条 #sim-toolbar(录制/通知/连接等常驻控件保留在
+      // 场景工具条搬入页签内工具条 #sim-toolbar(通知/连接等常驻控件保留在
       // 顶部工具条);注释层 .annotation-layer 由 scene.js 挂到 canvas 父节点(#sim-stage)。
       // ④ 真机 ROS 命令区搬入独立的「ROS 指令」页签。
       // 仅移动版搬 DOM(桌面 index.html 保持浮层);insertBefore/appendChild
@@ -631,6 +796,19 @@
         var tools = document.querySelector('.scene-tools');
         var tabs = panel.querySelector('.control-tabs');
         if (tools && tabs && tools.parentElement !== panel) panel.insertBefore(tools, tabs);
+        // ROS 连接栏整行:把地址框与连接按钮包成不可拆分的行容器,
+        // 使其独占工具条首行,其余控件自然换行到下一行(配合 .ros-bar-row 样式)
+        if (tools) {
+          var urlDd = tools.querySelector('.ros-url-dd');
+          var connBtn = document.getElementById('ros-connect-btn');
+          if (urlDd && connBtn && urlDd.parentElement === connBtn.parentElement) {
+            var barRow = document.createElement('div');
+            barRow.className = 'ros-bar-row';
+            urlDd.parentElement.insertBefore(barRow, urlDd);
+            barRow.appendChild(urlDd);
+            barRow.appendChild(connBtn);
+          }
+        }
         var stage = document.getElementById('sim-stage');
         if (stage) {
           ['#scene', '#loading-overlay', '#sim-disabled-overlay'].forEach(function (sel) {
@@ -691,6 +869,22 @@
           });
         });
       });
+    </script>
+    <script>
+      // PWA Service Worker 注册
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          // 新 SW 接管时自动刷新一次:首次安装不刷,升级接管才刷,防止旧 SW 页面滞留旧资源
+          var swHadController = !!navigator.serviceWorker.controller;
+          navigator.serviceWorker.addEventListener('controllerchange', function () {
+            if (!swHadController) { swHadController = true; return; }
+            location.reload();
+          });
+          navigator.serviceWorker.register('./service-worker.js').catch(function (e) {
+            console.warn('[SW] 注册失败:', e);
+          });
+        });
+      }
     </script>
   </body>
 </html>

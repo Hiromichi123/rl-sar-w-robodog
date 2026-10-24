@@ -1,0 +1,3 @@
+# DM-IMU-L1 惯性模块固定命名为 /dev/ttyimu（程序中 DM_IMU_PORT 硬编码）
+# 设备: USB 6877:4d55 DM-Tech DM-IMU-L1, 序列号 DMIMU20250212
+SUBSYSTEM=="tty", ATTRS{idVendor}=="6877", ATTRS{idProduct}=="4d55", SYMLINK+="ttyimu", MODE="0660", GROUP="dialout"

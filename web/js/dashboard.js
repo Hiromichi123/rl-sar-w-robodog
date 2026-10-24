@@ -13,24 +13,174 @@
  */
 import { jointStates, visibleControls, currentModelId, shared } from './state.js?v=1';
 import { labelForJoint } from './joints.js?v=1';
-import { JOINT_MAPPING, motorTelemetry } from './ros-bridge.js?v=981';
-import { isParamAlarmed } from './alarm.js?v=970';
+import { JOINT_MAPPING, motorTelemetry } from './ros-bridge.js?v=2026102001';
+import { isParamAlarmed } from './alarm.js?v=2026102001';
 
 /** 刷新节流间隔(ms),约 10fps */
 const REFRESH_INTERVAL_MS = 100;
+
+/** 数据新鲜度阈值(ms):超过该时间未收到新数据即标红 */
+const STALE_AFTER_MS = 1000;
 
 /** 电机温度色阶阈值(°C):≥60 预警(橙),≥75 过热(红) */
 const MOTOR_TEMP_WARN = 60;
 const MOTOR_TEMP_DANGER = 75;
 
+/** 电机反馈年龄色阶阈值(ms):与后端断线检测一致,≥500 预警(橙),≥1000 断线(红) */
+const MOTOR_AGE_WARN_MS = 500;
+const MOTOR_AGE_DANGER_MS = 1000;
+
+/** 数值格短标签:PC 表头已含同名列,此处写入 data-label 供移动端卡片式
+ *  布局(表头隐藏后)用 CSS ::before 回显字段名。 */
+const CELL_LABELS = {
+  targetPos: '目标位置',
+  realPos: '实际位置',
+  targetVel: '目标速度',
+  realVel: '实际速度',
+  targetTau: '目标力矩',
+  realTau: '实际力矩',
+  kp: 'kp 刚度',
+  kd: 'kd 阻尼',
+  temp: '温度 °C',
+  age: '更新',
+};
+
 // ── DOM 引用 ─────────────────────────────────────────────
 const viewEl = document.querySelector('#dashboard-control-view');
 const motorGridEl = document.querySelector('#dashboard-motor-grid');
 const imuGridEl = document.querySelector('#dashboard-imu-grid');
+// 视图切换三件套仅移动端(mobile.html)存在;PC 端为 null → 相关逻辑整体跳过
+const dashBarEl = document.querySelector('#dash-view-bar');
+const dashChipsEl = document.querySelector('#dash-field-chips');
+const dashFieldGridEl = document.querySelector('#dashboard-field-grid');
+const dashScrollEl = document.querySelector('#dashboard-control-view .dash-scroll');
 
 // ── 电机行缓存 ───────────────────────────────────────────
 /** @type {{signature: string, rows: Array<{name: string, rowEl: HTMLElement, cells: Object<string, HTMLElement>}>}} */
 const motor = { signature: '', rows: [] };
+
+// ── 看板视图(按字段 / 按电机)─────────────────────────────
+// 按字段:4×4 网格(行=FL/FR/RL/RR,列=髋/大腿/小腿/轮),一次只显示一个指标的
+//   全 16 台电机值 —— 解决卡片式布局把同一字段拆散到各卡片、无法逐列比对「相同项」
+//   的问题;排布与「关节管理」的置零矩阵同构。
+// 按电机:每台一张卡片,看单机全貌(原卡片布局保持不变)。
+const DASH_VIEW_KEY = 'jxg_dash_view';
+const DASH_FIELD_KEY = 'jxg_dash_field';
+/** 指标顺序 = 表格列顺序;文案复用 CELL_LABELS */
+const FIELD_ORDER = ['targetPos', 'realPos', 'targetVel', 'realVel', 'targetTau', 'realTau', 'kp', 'kd', 'temp', 'age'];
+/** 网格列:关节类型 → 表头短名 */
+const FIELD_JOINTS = [['hip', '髋'], ['thigh', '大腿'], ['calf', '小腿'], ['foot', '轮']];
+/** 行值格 → 字段网格值格需同步的状态类(色阶/报警/等待) */
+const FIELD_SYNC_FLAGS = ['is-warn', 'is-danger', 'is-waiting', 'is-alarmed'];
+
+/** @type {{view: 'field'|'motor', field: string, cells: Map<string, HTMLElement>, signature: string}} */
+const dashView = { view: 'field', field: 'realPos', cells: new Map(), signature: '' };
+let dashViewBound = false;
+
+/** 视图切换 / 指标选择持久化(存储不可用则仅本次会话生效) */
+function persistDashView() {
+  try {
+    localStorage.setItem(DASH_VIEW_KEY, dashView.view);
+    localStorage.setItem(DASH_FIELD_KEY, dashView.field);
+  } catch { /* 隐私模式/存储禁用:忽略 */ }
+}
+
+/** 绑定切换与指标按钮(仅一次) */
+function initDashViewOnce() {
+  if (dashViewBound || !dashBarEl) return;
+  dashViewBound = true;
+  try {
+    if (localStorage.getItem(DASH_VIEW_KEY) === 'motor') dashView.view = 'motor';
+    const f = localStorage.getItem(DASH_FIELD_KEY);
+    if (f && FIELD_ORDER.includes(f)) dashView.field = f;
+  } catch { /* 读取失败:保持默认 */ }
+  dashBarEl.addEventListener('click', (e) => {
+    const viewBtn = e.target.closest('[data-dash-view]');
+    if (viewBtn) {
+      dashView.view = viewBtn.dataset.dashView === 'motor' ? 'motor' : 'field';
+      persistDashView();
+      applyDashView();
+      refreshNow();
+      return;
+    }
+    const chip = e.target.closest('[data-dash-field]');
+    if (chip) {
+      dashView.field = chip.dataset.dashField;
+      persistDashView();
+      applyDashView();
+      refreshNow();
+    }
+  });
+}
+
+/** 四足模型(16 台电机可归到 4 腿 × 4 关节)才提供「按字段」网格 */
+function fieldModeAvailable() {
+  return motor.rows.length > 0 && motor.rows.every((r) => r.rowEl.dataset.leg && r.rowEl.dataset.joint);
+}
+
+/** 指标 chips:按 FIELD_ORDER 生成(值只在字段视图下有意义,故随视图显隐) */
+function buildFieldChips() {
+  if (!dashChipsEl || dashChipsEl.childElementCount) return;
+  FIELD_ORDER.forEach((f) => {
+    const btn = el('button', 'dash-field-chip', CELL_LABELS[f] || f);
+    btn.type = 'button';
+    btn.dataset.dashField = f;
+    dashChipsEl.appendChild(btn);
+  });
+}
+
+/** 应用当前视图:切换两套 DOM 的显隐与按钮高亮 */
+function applyDashView() {
+  if (!dashBarEl) return;
+  const fieldOn = dashView.view === 'field';
+  if (dashFieldGridEl) dashFieldGridEl.hidden = !fieldOn;
+  if (dashScrollEl) dashScrollEl.hidden = fieldOn;
+  if (dashChipsEl) dashChipsEl.hidden = !fieldOn;
+  dashBarEl.querySelectorAll('[data-dash-view]').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.dashView === dashView.view);
+  });
+  if (dashChipsEl) {
+    dashChipsEl.querySelectorAll('[data-dash-field]').forEach((b) => {
+      b.classList.toggle('is-active', b.dataset.dashField === dashView.field);
+    });
+  }
+}
+
+/** 构建 4×4 字段网格:表头 4 关节 + 每腿一行;值格按电机名缓存,刷新时与行值格同步 */
+function buildFieldGrid() {
+  if (!dashFieldGridEl) return;
+  const legs = [];
+  const slot = new Map();   // `腿|关节` → 电机名
+  motor.rows.forEach((r) => {
+    const leg = r.rowEl.dataset.leg;
+    const joint = r.rowEl.dataset.joint;
+    if (!leg || !joint) return;
+    if (!legs.includes(leg)) legs.push(leg);
+    slot.set(`${leg}|${joint}`, r.name);
+  });
+  const signature = `${legs.join(',')}|${motor.signature}`;
+  if (signature === dashView.signature) return;
+  dashView.signature = signature;
+  dashView.cells.clear();
+  dashFieldGridEl.textContent = '';
+  dashFieldGridEl.appendChild(el('div', 'dash-field-corner'));          // 左上角空位
+  FIELD_JOINTS.forEach(([, short]) => dashFieldGridEl.appendChild(el('div', 'dash-field-colhead', short)));
+  legs.forEach((leg) => {
+    dashFieldGridEl.appendChild(el('div', 'dash-field-rowhead', leg));
+    FIELD_JOINTS.forEach(([joint]) => {
+      const name = slot.get(`${leg}|${joint}`);
+      const cell = el('div', 'dash-field-cell', '—');
+      if (!name) {
+        cell.classList.add('is-empty');                                // 该模型缺这一格
+      } else {
+        cell.title = name;
+        if (joint === 'foot') cell.classList.add('is-wheel');          // 足端轮(轮子)虚线区分
+        dashView.cells.set(name, cell);
+      }
+      dashFieldGridEl.appendChild(cell);
+    });
+  });
+}
 
 // ── 电机表筛选(按腿 / 按关节,仅四足模型,均支持多选) ─────
 /** 当前筛选:每组一个已选值集合;空集合 = 不限制(等同"全部")。
@@ -225,11 +375,11 @@ function rebuildMotorRows() {
   motor.signature = signature;
   motor.rows = [];
   motorGridEl.textContent = '';
-  const CELLS = ['targetPos', 'realPos', 'targetVel', 'realVel', 'targetTau', 'realTau', 'kp', 'kd', 'temp'];
+  const CELLS = ['targetPos', 'realPos', 'targetVel', 'realVel', 'targetTau', 'realTau', 'kp', 'kd', 'temp', 'age'];
   const hasCanList = !!CAN_ID_LIST[String(currentModelId)];
   names.forEach((name, index) => {
     const row = el('div', 'dash-motor-row');
-    // 序号即电机块号,与 /rl_real/motor_state 的 9/10 字段块下标一致
+    // 序号即电机块号,与 /rl_real/motor_state 的 9/10/11 字段块下标一致
     const idx = el('span', 'dash-motor-idx', String(index));
     const nameEl = el('span', 'dash-motor-name', labelForJoint(name));
     // CAN ID(仅四足模型 2):每组 4 个关节,髋=4/大腿=3/小腿=2/足端轮=1;MasterID 11~14
@@ -249,6 +399,7 @@ function rebuildMotorRows() {
     const cells = {};
     CELLS.forEach((field) => {
       const cell = el('span', `dash-motor-val dash-m-${field}`, '—');
+      cell.dataset.label = CELL_LABELS[field] || field;
       row.appendChild(cell);
       cells[field] = cell;
     });
@@ -259,6 +410,23 @@ function rebuildMotorRows() {
   const quadRows = motor.rows.filter((r) => r.rowEl.dataset.leg);
   buildFilterBar(quadRows.length === motor.rows.length && motor.rows.length > 0);
   applyMotorFilters();
+
+  // 视图切换(仅移动端有此 UI;PC 端 dashBarEl 为 null 直接跳过):
+  // 四足模型提供「按字段」4×4 网格;非四足无 4×4 语义 → 强制卡片视图
+  if (dashBarEl) {
+    initDashViewOnce();
+    const fieldOk = fieldModeAvailable();
+    dashBarEl.hidden = !fieldOk;
+    if (fieldOk) {
+      buildFieldChips();
+      buildFieldGrid();
+    } else {
+      dashView.view = 'motor';   // 临时降级,不写回持久化值(换回四足模型即恢复用户选择)
+      dashView.cells.clear();
+      dashView.signature = '';
+    }
+    applyDashView();
+  }
 }
 
 /** 构建 IMU 数值芯片(仅一次;模型切换不影响 IMU) */
@@ -298,12 +466,22 @@ function fmt(value, digits = 3) {
 
 /** 立即刷新一次所有数值 */
 function refreshNow() {
+  const now = performance.now();
   const imu = shared.imu;
   // 电机行:优先原始遥测(与真机打印一致);无遥测回退仿真 jointStates
   motor.rows.forEach((row) => {
     const tel = motorTelemetry.get(row.name);
     const st = jointStates.get(row.name);
     const get = (field) => (tel ? tel[field] : undefined);
+    // 反馈年龄(后端打戳)提前取出,同时用于年龄列着色与整行断线判定
+    const rawAge = get('ageMs');
+    // 整行变红有两种情形:
+    //  ① 帧级:整条 motor_state 停发超过 1s(websocket/后端异常)——全部行红
+    //  ② 电机级:帧照常到达,但该台反馈年龄 ≥1s(单路 CAN 断线只冻 4 台)——仅断线台行红。
+    //    ageMs<0(启动后从未收到反馈)维持「等待」灰,不触发行红,避免上电瞬间 16 行齐红。
+    const telStale = !!tel && (typeof tel.at !== 'number' || now - tel.at > STALE_AFTER_MS);
+    const motorAgeDead = !!tel && typeof rawAge === 'number' && rawAge >= MOTOR_AGE_DANGER_MS;
+    const rowStale = telStale || motorAgeDead;
     row.cells.targetPos.textContent = fmt(get('targetPos') ?? st?.target);
     row.cells.realPos.textContent   = fmt(get('realPos') ?? st?.value);
     row.cells.targetVel.textContent = fmt(get('targetVel'));
@@ -317,15 +495,52 @@ function refreshNow() {
     // 温度色阶:60°C 预警 / 75°C 过热(不依赖用户是否配置了温度报警规则)
     row.cells.temp.classList.toggle('is-warn', Number.isFinite(tempVal) && tempVal >= MOTOR_TEMP_WARN && tempVal < MOTOR_TEMP_DANGER);
     row.cells.temp.classList.toggle('is-danger', Number.isFinite(tempVal) && tempVal >= MOTOR_TEMP_DANGER);
+    // 更新时间(反馈年龄):直接显示后端打戳的 ageMs(真实反馈年龄)。
+    // 不再叠加 (now - tel.at):motor_state 发布间隔 125ms(8Hz),叠加会让显示值
+    // 在 0~125ms 间振荡,掩盖真实反馈延迟(<2ms)。无遥测/旧协议显示 —;
+    // 从未收到该电机显示「等待」(灰);≥0.5s 橙、≥1s 红。
+    const ageCell = row.cells.age;
+    ageCell.classList.remove('is-warn', 'is-danger', 'is-waiting');
+    if (!tel || typeof rawAge !== 'number') {
+      ageCell.textContent = '—';
+    } else if (rawAge < 0) {
+      ageCell.textContent = '等待';
+      ageCell.classList.add('is-waiting');
+      ageCell.title = '已收到遥测帧,但后端从未解析出该电机的有效反馈';
+    } else {
+      const ageNow = rawAge;
+      if (ageNow >= 1000) ageCell.textContent = `${(ageNow / 1000).toFixed(1)}s`;
+      else ageCell.textContent = `${Math.round(ageNow)}ms`;
+      ageCell.title = `距上次有效电机反馈 ${Math.round(ageNow)} ms(≥500ms 预警,≥1000ms 视为断线)`;
+      ageCell.classList.toggle('is-warn', ageNow >= MOTOR_AGE_WARN_MS && ageNow < MOTOR_AGE_DANGER_MS);
+      ageCell.classList.toggle('is-danger', ageNow >= MOTOR_AGE_DANGER_MS);
+    }
     // 报警标红:该关节该参数正处于报警状态
     for (const field of ['targetPos', 'realPos', 'targetVel', 'realVel', 'targetTau', 'realTau', 'temp']) {
-      row.cells[field].classList.toggle('is-alarmed', isParamAlarmed('motor', field, row.name));
+      const cell = row.cells[field];
+      cell.classList.toggle('is-alarmed', isParamAlarmed('motor', field, row.name));
+    }
+    // 冻结标红:整行(序号/名称/CAN/全部数值)变红——
+    // 帧停发(全红)或该台反馈年龄≥1s 视为断线(仅对应行红)
+    row.rowEl.classList.toggle('is-stale', rowStale);
+    // 按字段视图:把当前指标值格的文案与色阶同步到 4×4 网格对应格,
+    // 复用同一份阈值判定,无需为网格再实现一套
+    const srcCell = row.cells[dashView.field];
+    const dstCell = dashView.cells.get(row.name);
+    if (srcCell && dstCell) {
+      dstCell.textContent = srcCell.textContent;
+      for (const flag of FIELD_SYNC_FLAGS) dstCell.classList.toggle(flag, srcCell.classList.contains(flag));
+      dstCell.classList.toggle('is-stale', rowStale);
     }
   });
   // IMU 芯片
+  // 新鲜度:lastMsgAt 无效或距上次消息超过 1s 即整芯片标红
+  const imuStale = !imu || typeof imu.lastMsgAt !== 'number' || now - imu.lastMsgAt > STALE_AFTER_MS;
   imuCells.forEach((cell) => {
     cell.el.textContent = fmt(cell.get(imu));
     if (cell.alarmId) cell.el.classList.toggle('is-alarmed', isParamAlarmed('imu', cell.alarmId));
+    // chip 为数值元素的父节点,class 加在芯片上使标签+数值一起变红
+    cell.el.parentElement?.classList.toggle('is-stale', imuStale);
   });
 }
 

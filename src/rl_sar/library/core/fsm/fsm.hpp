@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <memory>
 #include <vector>
+#include <atomic>
 #include "logger.hpp"
 
 class FSMState
@@ -37,9 +38,9 @@ public:
 
     void SetInitialState(const std::string &name)
     {
-        current_state_ = states_.at(name);
-        current_state_->Enter();
-        next_state_ = current_state_;
+        std::atomic_store(&current_state_, states_.at(name));
+        std::atomic_load(&current_state_)->Enter();
+        next_state_ = std::atomic_load(&current_state_);
         std::cout << LOGGER::INFO << "[FSM] Set initial state: " << name << std::endl;
     }
 
@@ -51,37 +52,39 @@ public:
             return;
         }
 
-        if (current_state_ && current_state_->GetStateName() != state_name)
+        auto cur = std::atomic_load(&current_state_);
+        if (cur && cur->GetStateName() != state_name)
         {
             next_state_ = states_.at(state_name);
             mode_ = Mode::CHANGE;
-            std::cout << std::endl << LOGGER::INFO << "[FSM] Request switch from " << current_state_->GetStateName() << " to " << next_state_->GetStateName() << std::endl;
+            std::cout << std::endl << LOGGER::INFO << "[FSM] Request switch from " << cur->GetStateName() << " to " << next_state_->GetStateName() << std::endl;
         }
     }
 
     void Run()
     {
-        if (!current_state_)
+        auto cur = std::atomic_load(&current_state_);
+        if (!cur)
             return;
 
         if (mode_ == Mode::NORMAL)
         {
-            current_state_->Run();
-            std::string next = current_state_->CheckChange();
-            if (next != current_state_->GetStateName())
+            cur->Run();
+            std::string next = cur->CheckChange();
+            if (next != cur->GetStateName())
             {
                 mode_ = Mode::CHANGE;
                 next_state_ = states_.at(next);
-                std::cout << std::endl << LOGGER::NOTE << "[FSM] Switch from " << current_state_->GetStateName() << " to " << next_state_->GetStateName() << std::endl;
+                std::cout << std::endl << LOGGER::NOTE << "[FSM] Switch from " << cur->GetStateName() << " to " << next_state_->GetStateName() << std::endl;
             }
         }
         else if (mode_ == Mode::CHANGE)
         {
-            current_state_->Exit();
-            previous_state_ = current_state_;
-            current_state_ = next_state_;
+            cur->Exit();
+            previous_state_ = cur;
+            std::atomic_store(&current_state_, next_state_);
             auto expected_state = next_state_;  // Save the state we're entering
-            current_state_->Enter();
+            next_state_->Enter();
 
             // Check if Enter() triggered another state change request
             if (mode_ == Mode::CHANGE && next_state_ != expected_state) {
@@ -90,7 +93,7 @@ public:
             }
 
             mode_ = Mode::NORMAL;
-            current_state_->Run();
+            next_state_->Run();
         }
     }
 
@@ -100,8 +103,20 @@ public:
         CHANGE
     };
 
+    // 线程安全的当前状态名快照。
+    // current_state_ 仅在 FSM::Run()(200Hz 实时线程)中被写,
+    // 但会被 web/50ms timer/HR 日志等其他线程读取。
+    // 直接跨线程读 shared_ptr 是 UB;写方(FSM::Run/SetInitialState)用
+    // std::atomic_store,读方(本方法及各web/timer/日志线程)用
+    // std::atomic_load 取原子快照,states_ 持有强引用保证对象常驻。
+    std::string GetCurrentStateName() const
+    {
+        auto s = std::atomic_load(&current_state_);
+        return s ? s->GetStateName() : std::string();
+    }
+
     std::unordered_map<std::string, std::shared_ptr<FSMState>> states_;
-    std::shared_ptr<FSMState> current_state_;
+    std::shared_ptr<FSMState> current_state_;  // C++17: 用 atomic_load/atomic_store 跨线程读写
     std::shared_ptr<FSMState> next_state_;
     std::shared_ptr<FSMState> previous_state_;
     Mode mode_;

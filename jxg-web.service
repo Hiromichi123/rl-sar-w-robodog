@@ -1,0 +1,31 @@
+# 独立 Web 上位机进程:与 rl_real_JXG 解耦,重启控制程序时
+# 浏览器连接 / WebSSH 会话 / 实时日志流均不中断。
+# ROS2 话题桥经 DDS(UDP-only)与 rl_real 通信,同机 domain 0。
+#
+# 本文件是模板: @REPO_ROOT@ 由 scripts/install_service.sh 在安装时按脚本自身
+# 所在目录自动渲染(整目录复制为 vN 后无需再改本文件的任何路径)。
+# 与主程序 rl-real-jxg 一同安装: sudo bash scripts/install_service.sh
+
+[Unit]
+Description=JXG standalone web console (web_server, ROS2<->WS/HTTP bridge)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=@REPO_ROOT@
+ExecStart=@REPO_ROOT@/scripts/start_web.sh
+Restart=always
+RestartSec=2
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=10
+Nice=-5
+# 锁定小核 CPU0-3(A53):大核 4-7 预留给 rl_real_JXG 实时控制环,
+# 避免 web 的 FastDDS/HTTP 线程在大核上抢占,增加控制环调度抖动。
+CPUAffinity=0 1 2 3
+
+[Install]
+WantedBy=multi-user.target

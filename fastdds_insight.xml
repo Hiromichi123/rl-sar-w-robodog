@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  FastDDS 网络接口白名单
+  目的：让 DDS 同时在本机回环 + Insight 9 的 USB 以太网卡上做发现。
+
+  背景：Insight 9 通过 USB 以太网（link-local 169.254.10.x）接入主机。
+  FastDDS 默认只在默认接口（wlan0）上组播发现，导致相机话题无法被发现。
+  通过 interfaceWhiteList 显式指定回环 + USB 网卡地址即可解决。
+
+  注意：169.254.10.2 是 USB 网卡 enx020000000a01 的 link-local 地址
+  （由 avahi 基于网卡 MAC 生成，通常稳定）。若相机重插后该地址变化，
+  请用 `ip -br addr show | grep enx` 查看并同步更新此文件。
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_local_usb</transport_id>
+        <type>UDPv4</type>
+        <interfaceWhiteList>
+          <address>127.0.0.1</address>
+          <address>169.254.10.2</address>
+        </interfaceWhiteList>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="default_participant" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_local_usb</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

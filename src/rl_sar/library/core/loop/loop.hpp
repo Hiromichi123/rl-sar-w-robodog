@@ -122,6 +122,21 @@ private:
     {
         applyRealtimePriority();
 #ifdef __linux__
+        // 线程自绑核:必须在 applyRealtimePriority 之后执行。
+        // 原因:start() 中由主线程绑核,但此时子线程尚未设 FIFO 优先级,
+        // 亲和性巡检线程会把"非 RT 但绑大核"的线程纠正到小核 0-3。
+        // 等线程自身设为 FIFO 后再绑核,巡检因 policy==FIFO 跳过,亲和性才不会被覆盖。
+        if (_bindCPU != -1)
+        {
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(_bindCPU, &cpuset);
+            if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0)
+            {
+                std::cout << LOGGER::WARNING << "[Loop] " << _name
+                          << " 自绑核 CPU" << _bindCPU << " 失败(errno=" << errno << ")" << std::endl;
+            }
+        }
         // 栈预触: mlockall 只锁已物理分配的页,线程栈按需增长,深层调用时仍可能缺页。
         // 在进入实时循环前触碰 256KB 栈区(覆盖控制环调用深度),配合 MCL_FUTURE 锁死这些页。
         if (_rtPriority > 0)
@@ -140,12 +155,29 @@ private:
         auto next_deadline = std::chrono::steady_clock::now();
 
         // 超期统计(仅线程私有普通变量,健康路径零开销):
-        // 每秒一个报告窗口,窗口内出现超期才打印一行,健康时完全静默。
+        // 每秒一个报告窗口,按严重度分级打印,健康时完全静默:
+        //  - 显著超期(满足任一)→ 立即打印,同一告警间隔至少 10s 防持续过载刷屏:
+        //      a) 最长连击 >= 3(连续追拍,真实调度饥饿);
+        //      b) 单帧超期 >= max(50% 周期, 1ms):1kHz 环 50% 仅 0.5ms,零星亚毫秒
+        //         调度抖动也触发打印偏吵,加 1ms 绝对下限过滤;200Hz 环 50%=2.5ms
+        //         不受影响;超过 1ms 的真超期(如 1kHz 环迟 2 帧)仍立即报告;
+        //      c) 窗口内超期帧占比 >= 10%(持续性迟到,周期预算不够)。
+        //    注意不能只用"单帧幅度占周期百分比"判定——1kHz 环 0.4ms(40%)是正常
+        //    唤醒抖动,而 200Hz 环 0.7ms(14%)同理;占比+连击的组合才能跨周期通用。
+        //  - 轻微超期:低于上述门限 → 静默累计,每 60s 汇总一行。
         uint64_t total_overruns = 0;
         uint64_t win_overruns = 0;
+        uint64_t win_cycles = 0;                                          // 窗口内完成的总周期数(算占比)
         int64_t  win_max_overrun_ns = 0;
         int      consecutive = 0, max_consecutive = 0;
         auto report_window_start = next_deadline;
+        const int64_t period_ns = period_us.count() * 1000;
+        constexpr int64_t kMinWarnIntervalNs = 10LL * 1000000000;         // 显著告警最小间隔 10s
+        constexpr int64_t kBenignSummaryNs = 60LL * 1000000000;           // 轻微抖动汇总周期 60s
+        auto last_warn_time = report_window_start;
+        uint64_t benign_accum = 0;
+        int64_t  benign_max_ns = 0;
+        auto benign_start = report_window_start;
 
         while (_running)
         {
@@ -153,6 +185,7 @@ private:
             _func();
 
             auto now = std::chrono::steady_clock::now();
+            ++win_cycles;
             bool this_cycle_overrun = false;
             if (next_deadline > now)
             {
@@ -179,22 +212,54 @@ private:
             }
             if (!this_cycle_overrun) consecutive = 0; // 本周期按时完成,连续超期计数中断
 
-            // 每秒汇总:仅在本窗口发生过超期时打印,避免健康状态下刷屏
+            // 每秒汇总:按严重度分级,健康状态完全静默
             if (now - report_window_start >= std::chrono::seconds(1))
             {
-                if (win_overruns > 0)
+                // 显著超期判定:连击>=3 / 单帧>=max(50%周期,1ms) / 占比>=10%
+                constexpr int64_t kSingleFrameMinNs = 1000000;  // 单帧门限绝对下限 1ms
+                const bool notable = (max_consecutive >= 3) ||
+                                     (win_max_overrun_ns * 2 >= period_ns &&
+                                      win_max_overrun_ns >= kSingleFrameMinNs) ||
+                                     (win_cycles > 0 && win_overruns * 10 >= win_cycles);
+                if (notable)
                 {
-                    printf("[Loop] OVERRUN name=%s period=%ldus 本秒超期=%llu 累计=%llu"
-                           " 最大超期=%.1fms 最长连击=%d%s\n",
-                           _name.c_str(),
-                           static_cast<int64_t>(_period * 1000000),
-                           static_cast<unsigned long long>(win_overruns),
-                           static_cast<unsigned long long>(total_overruns),
-                           win_max_overrun_ns / 1e6,
-                           max_consecutive,
-                           consecutive >= 3 ? " [连续超期!检查该线程负载/同核高优先级线程]" : "");
+                    if (now - last_warn_time >= std::chrono::nanoseconds(kMinWarnIntervalNs))
+                    {
+                        printf("[Loop] OVERRUN name=%s period=%ldus 本秒超期=%llu 累计=%llu"
+                               " 最大超期=%.1fms 最长连击=%d%s\n",
+                               _name.c_str(),
+                               static_cast<int64_t>(_period * 1000000),
+                               static_cast<unsigned long long>(win_overruns),
+                               static_cast<unsigned long long>(total_overruns),
+                               win_max_overrun_ns / 1e6,
+                               max_consecutive,
+                               consecutive >= 3 ? " [连续超期!检查该线程负载/同核高优先级线程]" : "");
+                        last_warn_time = now;
+                    }
+                    benign_accum = 0;
+                    benign_max_ns = 0;
+                    benign_start = now;
+                }
+                else if (win_overruns > 0)
+                {
+                    benign_accum += win_overruns;
+                    if (win_max_overrun_ns > benign_max_ns) benign_max_ns = win_max_overrun_ns;
+                    if (now - benign_start >= std::chrono::nanoseconds(kBenignSummaryNs))
+                    {
+                        printf("[Loop] OVERRUN name=%s period=%ldus 近60s轻微超期%llu次"
+                               " 最大=%.1fms 累计=%llu——零星调度抖动,正常范围\n",
+                               _name.c_str(),
+                               static_cast<int64_t>(_period * 1000000),
+                               static_cast<unsigned long long>(benign_accum),
+                               benign_max_ns / 1e6,
+                               static_cast<unsigned long long>(total_overruns));
+                        benign_accum = 0;
+                        benign_max_ns = 0;
+                        benign_start = now;
+                    }
                 }
                 win_overruns = 0;
+                win_cycles = 0;
                 win_max_overrun_ns = 0;
                 max_consecutive = 0;
                 report_window_start = now;

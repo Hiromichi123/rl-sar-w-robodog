@@ -89,6 +89,12 @@ export const shared = {
     decayStartAt: 0,     // 0=不在衰减, >0=衰减开始时间戳
     decayDuration: 300,  // 衰减持续时间(ms)
     decayFrom: { nx: 0, ny: 0, vx: 0, vy: 0, omega: 0 }, // 衰减起点快照
+    // 速度锁定/转向高度锁定(定速巡航):左右摇杆各自独立开关——
+    // cruiseLockedLeft=true 保持开启瞬间的 vx/vy;cruiseLockedRight=true 保持
+    // 开启瞬间的 ω 与 Z(高度)。锁定时本杆摇杆输入被忽略、松手不回正;
+    // 运行时态,刻意不持久化——刷新/重连必须默认关。
+    cruiseLockedLeft: false,
+    cruiseLockedRight: false,
   },
   /** 当前底盘摇杆回调(方向键/手柄复用): { onMove(nx,ny,omega?), onEnd() } — omega 为右摇杆归一化输入 [-1,1] */
   joystickInput: null,

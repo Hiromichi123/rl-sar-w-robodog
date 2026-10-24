@@ -5,38 +5,36 @@
    级联顺序与原文件保持一致)
    ════════════════════════════════════════════════════════ */
 
-/* ── 录制列表(原 max-width:860px / 640px) ─────────────── */
-.recordings-list-header,
-.recordings-row { grid-template-columns: minmax(0, 2fr) minmax(0, 0.6fr) minmax(0, 1.2fr) minmax(0, 1.2fr) auto; }
-.recordings-list-header { display: none; }
-.recordings-row { grid-template-columns: 1fr; gap: 6px; padding: 12px 10px; }
-.recordings-row .rec-actions-col { justify-content: flex-start; }
+/* ── 文件管理:行高/字号紧凑,配合每页5条在面板内一屏显示,不出现纵向拖动条 ── */
+#files-control-view .sys-ftp-table th { padding: 4px 8px; }
+#files-control-view .sys-ftp-table td { padding: 4px 8px; font-size: 11.5px; }
 
 /* ── Twist 读数(原 max-width:768px) ───────────────────── */
 /* 作为 #movement-control-view 的直接子元素,order:-2 排在摇杆区(-1)之上 */
-/* 移动单行:不显示标题,x/y/z/ω 均分 + 帧数靠右(总高约 22px) */
+/* 移动 2×2 卡片:不显示话题名,4 张轴卡片两行两列 + 帧数靠右 */
 .twist-readout {
   order: -2;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 4px;
   margin: 0 0 6px;
-  padding: 2px 7px;
+  padding: 6px 8px;
 }
 .twist-readout .twist-title { display: none; }
-.twist-readout .twist-vals {
-  grid-column: auto; grid-row: auto;
-  flex: 1 1 auto;
-  display: flex; align-items: baseline; justify-content: space-between; gap: 2px;
-  line-height: 1.3;
-}
 .twist-readout .twist-count {
-  grid-column: auto; grid-row: auto;
-  flex-shrink: 0; margin-left: 8px;
+  margin-left: auto; flex-shrink: 0;
   font-size: 9px; padding: 0 5px; line-height: 1.5;
 }
-.twist-readout .twist-v { font-size: 9.5px; }
-.twist-readout .twist-v > span { font-size: 9px; }
-.twist-readout .twist-v output { font-size: 9.5px; padding: 0 3px; border-radius: 4px; }
+.twist-readout .twist-vals {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+.twist-readout .twist-v {
+  padding: 4px 6px; gap: 3px; font-size: 9.5px;
+}
+.twist-readout .twist-v output { font-size: 13px; }
+.twist-readout .twist-unit { font-size: 8.5px; }
 
 /* ── 话题调试:取消桌面对半 flex 分屏(手机面板仅半屏高,section 被压缩后
    按钮行会溢出盖到发送区标题),改为自然高度、面板整体滚动 ── */
@@ -145,6 +143,17 @@
 /* ROS 命令区下移后压缩留白,滚动到达时仍紧凑 */
 .ros-movement-section { margin-top: 4px; }
 .chassis-section { padding-bottom: 8px; }
+/* 命令胶囊(气泡)强制单行:「探针检测 · probe」等带英文后缀的按钮在窄屏
+   折成两行;网格列改 minmax(0,1fr) 允许收缩,文案 nowrap,极窄屏才省略号 */
+.ros-movement-section .behavior-pills {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.ros-movement-section .behavior-pill {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ── 小手机(原 max-width:380px) ───────────────────────── */
 .topbar { gap: 6px; padding: 0 10px; }
@@ -181,7 +190,7 @@
 /* ── ② 场景工具栏:全部控件平铺在顶部(不收起)。
    display:contents 拆平 view-buttons/scene-options 分组容器,
    让 11 个控件作为同级 flex item 自由重排:360px 下恰好 3 行
-   (模型+地址+连接 / real_pos+录制+注释+重心 / 4 个视图按钮) ── */
+   (模型+地址+连接 / real_pos+注释+重心 / 4 个视图按钮) ── */
 .scene-tools {
   top: 48px;
   gap: 4px;
@@ -197,7 +206,14 @@
   display: contents;   /* 容器"消失",内部按钮直接参与工具条 flex 换行 */
 }
 /* 拆平后直接子项(select 包裹层/按钮/checkbox label)统一次寸与去边框 */
-.scene-tools > .ros-url-dd { flex: 0 0 auto; }
+/* ROS 连接栏整行:行容器(地址框+连接按钮)由 mobile.html 内联脚本包好,
+   flex-basis 100% 保证独占首行,内部地址框拉伸吃满剩余宽度 */
+.scene-tools > .ros-bar-row {
+  display: flex; flex: 1 1 100%;
+  align-items: center; gap: 4px;
+}
+.ros-bar-row > .ros-url-dd { flex: 1 1 auto; min-width: 0; }
+.ros-bar-row .ros-url-input { width: 100%; min-width: 0; }
 .scene-tools .view-buttons > *,
 .scene-tools .scene-options > * { border-left: none; }
 /* 桌面端组间竖线挂在首个 annotation-toggle 上(特异性 0,4,0),移动端需同特异性覆盖 */
@@ -252,18 +268,9 @@
 /* 工具条与页签贴合:页签顶部留白收紧,二者成组 */
 #control-panel > .scene-tools + .control-tabs { padding-top: 4px; }
 
-/* ── ③ 数据看板:12 列电机表横向滚动(表头与数据同容器同步滚动) ── */
-.dash-scroll {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: thin;
-}
-.dash-scroll .dashboard-motor-head,
-.dash-scroll .dash-motor-row { min-width: 620px; }
-.dash-scroll .dashboard-motor-head {
-  position: static;           /* 容器即滚动视口,sticky 表头失去意义,改随行滚动 */
-  top: auto;
-}
+/* ── ③ 数据看板:原 12 列电机表横向滚动方案已废弃 ──
+   现改为每台电机一张卡片(消除横向滑动),具体规则见文件末尾
+   「数据看板 / 关节管理:消除横向滚动,一屏看全(v=1050)」段落。 */
 
 /* ── ④ 细节:面板内上下留白收紧、摇杆区呼吸感 ── */
 /* 面板 padding 归零:页签栏全宽贴死面板顶部(sticky top:0 无缝隙),
@@ -386,35 +393,603 @@ body.sim-off .sim-toolbar { display: none; }
 #sim-stage { position: relative; flex: 1 1 auto; min-height: 0; }
 #sim-stage #scene { width: 100%; height: 100%; display: block; }
 
-/* 仅剩四个页签:均分整行,不再横向滚动 */
-.control-tabs { overflow-x: hidden; }
+/* 页签栏可横向滚动:10 个页签均分会过窄,改为自适应宽度 + 横向滚动 */
+.control-tabs { overflow-x: auto; }
 .control-tabs button {
-  flex: 1 1 0;
-  padding: 8px 6px;
+  flex: 0 0 auto;
+  padding: 8px 11px;
   text-align: center;
 }
 
-/* 顶部仿真开关隐藏:移动端仿真启停由「仿真」页签联动承担,功能重复 */
+/* 顶部工具条的仿真开关保持隐藏(页签即开关);
+   启动覆盖层/启动按钮恢复显示:未加载模型时仿真页签内展示"启动 3D 仿真"卡片 */
 #sim-toggle-btn { display: none !important; }
 
-/* 移动控制页常用姿态命令快捷条:检查站立/站立/趴下/强化学习 强制一排四等分。
-   minmax(0,1fr)+min-width:0 允许列收缩到内容以下;按钮 nowrap+省略,
-   保证 320px 窄屏也不换行成两排 */
-.quick-behavior-bar {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-  margin: 8px 0 2px;
+/* ═══════════════════════════════════════════════════════
+   「模型」页签(主控模型管理)移动端适配
+   PC 端 .model-file-table min-width:660px(大小/时间/操作三列定宽),
+   手机屏必然横向溢出;此处收窄为「文件名+操作」两列布局。
+   ═══════════════════════════════════════════════════════ */
+#models-control-view .sys-ftp-table,
+#models-control-view .model-file-table { min-width: 0; table-layout: auto; }
+/* 藏「大小/修改时间」两列,只留 文件名+操作 */
+#models-control-view .model-file-table th:nth-child(2),
+#models-control-view .model-file-table td:nth-child(2),
+#models-control-view .model-file-table th:nth-child(3),
+#models-control-view .model-file-table td:nth-child(3) { display: none; }
+#models-control-view .model-file-table th,
+#models-control-view .model-file-table td { padding: 7px 6px; font-size: 11.5px; }
+/* 长文件名截断显示(完整名在 title 悬浮/启用后生效) */
+#models-control-view .model-file-name {
+  display: inline-block;
+  max-width: 52vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
 }
-.quick-behavior-bar .behavior-pill {
-  min-width: 0;
-  padding: 10px 2px;
-  font-size: 11.5px;
-  letter-spacing: -0.2px;
+/* 操作按钮:小屏收窄,允许换行 */
+#models-control-view .model-file-table td.sys-ftp-act { white-space: normal; }
+#models-control-view .model-file-table td.sys-ftp-act .ftp-act-btn { margin: 2px 2px 0 0; padding: 3px 7px; font-size: 10.5px; }
+/* 卡片头部:目录名过长换行,标签/按钮收窄 */
+#models-control-view .model-sub-head { flex-wrap: wrap; }
+#models-control-view .model-sub-title { font-size: 12.5px; word-break: break-all; }
+#models-control-view .model-active-tag,
+#models-control-view .model-cur-tag { font-size: 10px; padding: 1px 6px; }
+#models-control-view .model-cfg-edit-btn,
+#models-control-view .model-up-label { font-size: 10.5px; }
+/* 工具条与提示文案 */
+#models-control-view .sys-power-bar { flex-wrap: wrap; gap: 6px; }
+#models-control-view .sys-hint { font-size: 10.5px; line-height: 1.45; }
+/* 分页条 */
+#models-control-view .sys-ftp-pager { flex-wrap: wrap; gap: 6px; }
+
+/* ═══════════════════════════════════════════════════════
+   移动控制页整体优化(v=1046)
+   ═══════════════════════════════════════════════════════ */
+
+/* ── 当前姿态栏卡片(v=1076,与 Twist 卡片同构):
+   标题行:当前姿态 + BMS 电量徽标(贴右,充放静状态已融合);
+   胶囊行:姿态胶囊 + CAN / 站姿 / 卧姿 / 探针 四枚门禁胶囊,等宽均布 ── */
+/* 姿态栏卡片(与 Twist 卡片同构):标题行(当前姿态 + 🔋 靠右) + 胶囊行(门禁胶囊等宽一行) */
+#movement-control-view .posture-bar {
+  order: -1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 9px;
+  margin-bottom: 6px;
+}
+#movement-control-view .posture-bar .posture-head { gap: 6px; }
+#movement-control-view .posture-bar .posture-bar-label { font-size: 10.5px; }
+#movement-control-view .posture-bar .move-batt-soc {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
   border-radius: 10px;
+  white-space: nowrap;
+}
+#movement-control-view .posture-bar .posture-pills { gap: 4px 5px; }
+#movement-control-view .posture-bar .posture-pill { font-size: 11.5px; padding: 2px 8px; }
+/* 四枚门禁胶囊等宽均布,文字居中,长文案也不会被挤换行 */
+#movement-control-view .posture-bar .can-pill,
+#movement-control-view .posture-bar .gate-pill,
+#movement-control-view .posture-bar .lie-pill,
+#movement-control-view .posture-bar .probe-pill {
+  flex: 1 1 0;
+  min-width: 0;   /* 允许等宽格收缩到文字宽度以下:否则 nowrap 的 min-content 撑宽挤成三行 */
+  text-align: center;
+  font-size: 10.5px;
+  padding: 1px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#movement-control-view .posture-bar .posture-fsm { display: none; }
+/* 320px 级老机型:四枚门禁等宽格仅约 64px,"探针 未检测"临界,
+   缩字号/内边距/间距保证仍在同一行 */
+@media (max-width: 340px) {
+  #movement-control-view .posture-bar { gap: 4px; }
+  #movement-control-view .posture-bar .can-pill,
+  #movement-control-view .posture-bar .gate-pill,
+  #movement-control-view .posture-bar .lie-pill,
+  #movement-control-view .posture-bar .probe-pill {
+    font-size: 9.5px;
+    padding: 1px 2px;
+  }
+}
+
+/* ── 锁定按钮:两枚等宽铺满 + 加高触控(原居中小胶囊,手机上难点中) ── */
+.joy-lock-bar { gap: 8px; margin: 8px 0 0; }
+.joy-lock-bar .joy-lock-btn {
+  flex: 1 1 0;
+  justify-content: center;
+  padding: 9px 8px;
+}
+
+/* ── 摇杆区「安全起立」一键流程(v=1063) ──
+   按钮:绿色渐变;执行中 .is-running 加对角高光扫过 + 投影呼吸;
+   下方步骤芯片随流程切换 等待/旋转中/通过/失败/跳过 ── */
+.safe-getup-bar { margin: 8px 0 2px; }
+/* 操作行:安全起立(自适应铺满) + 趴下(定宽) */
+.safe-getup-actions {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.safe-getup-btn {
+  position: relative;
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 11px 10px;
+  border: 1px solid rgba(20, 184, 163, 0.55);
+  border-radius: 10px;
+  background: linear-gradient(135deg, #0e8f7a, #14b8a0);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  box-shadow: 0 2px 8px rgba(14, 143, 122, 0.3);
+}
+.safe-getup-btn:active { transform: scale(.985); }
+.safe-getup-btn:disabled { opacity: .92; color: #fff; }
+/* 趴下按钮:暖色描边,与绿色安全起立区分;流程运行中置灰禁用 */
+.safe-getdown-btn {
+  flex: 0 0 88px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 11px 8px;
+  border: 1px solid rgba(244,162,97,.6);
+  border-radius: 10px;
+  background: rgba(244,162,97,.12);
+  color: #f4a261;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+.safe-getdown-btn:active { transform: scale(.985); }
+.safe-getdown-btn.is-pressed { background: rgba(244,162,97,.28); }
+.safe-getdown-btn:disabled { opacity: .5; }
+.safe-getup-btn > * { position: relative; z-index: 1; }
+.safe-getup-icon { margin-right: 6px; }
+/* 执行中:底色投影呼吸 + 对角高光循环扫过 */
+.safe-getup-btn.is-running { animation: sgBtnBreath 1.6s ease-in-out infinite; }
+.safe-getup-btn.is-running::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: linear-gradient(115deg, transparent 32%, rgba(255,255,255,.38) 50%, transparent 68%);
+  animation: sgShimmer 1.25s linear infinite;
+}
+@keyframes sgShimmer {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+@keyframes sgBtnBreath {
+  0%, 100% { box-shadow: 0 2px 8px rgba(14,143,122,.3); }
+  50%      { box-shadow: 0 2px 18px rgba(20,184,163,.6); }
+}
+/* 按钮内 5 段进度条(卧姿/探针/起立/站姿/强化):贴按钮底边,5 等分分段 */
+.safe-getup-track {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 5px;
+  z-index: 1;
+  display: flex;
+  gap: 3px;
+  height: 4px;
+  pointer-events: none;
+}
+.sg-seg {
+  flex: 1 1 0;
+  height: 100%;
+  border-radius: 2px;
+  background: rgba(255,255,255,.28);   /* idle:半透明白 */
+  transition: background-color .25s ease;
+}
+.sg-seg.is-run { background: #7cc3ff; animation: sgSegPulse 1s ease-in-out infinite; }
+.sg-seg.is-ok  { background: #d8ffe7; }   /* 绿底按钮上用浅绿保证对比 */
+.sg-seg.is-fail {
+  background: #ff5c5c;
+  animation: sgSegFail .45s ease 2;
+}
+.sg-seg.is-skip { background: rgba(255,255,255,.45); }
+@keyframes sgSegPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .35; }
+}
+@keyframes sgSegFail {
+  25% { transform: scaleY(.4); }
+  50% { transform: scaleY(1.2); }
+  75% { transform: scaleY(.7); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .safe-getup-btn.is-running,
+  .safe-getup-btn.is-running::before,
+  .sg-seg.is-run,
+  .sg-seg.is-fail { animation: none; }
+}
+
+/* ═══════════════════════════════════════════════════════
+   「模型」页签卡片头部重排(v=1047)
+   第一行:目录名+激活标签(标签可换行,长模型名 break-all)
+   第二行:编辑配置/上传模型/删除目录 三按钮等宽铺满
+   ═══════════════════════════════════════════════════════ */
+#models-control-view .model-sub-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+#models-control-view .model-sub-title {
+  flex: 1 1 100%;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  word-break: break-all;
+  font-size: 13px;
+}
+#models-control-view .model-active-tag {
+  flex: 1 1 100%;
+  width: fit-content;
+  word-break: break-all;
+  white-space: normal;
+  line-height: 1.5;
+}
+/* 头部三按钮严格等大:同高 32px、同字号、等宽铺满一行,
+   显式 display:inline-flex 对齐(覆盖基础样式里 label/button 的盒型差异) */
+#models-control-view .model-cfg-edit-btn,
+#models-control-view .model-up-label,
+#models-control-view .model-sub-head .ftp-act-btn {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 32px;
+  margin: 0;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+/* 文件行操作列:备注/启用/下载/删除 4 按钮 2x2 等宽等高网格 */
+#models-control-view .model-file-table td.sys-ftp-act {
+  display: table-cell;
+  width: 116px;
+}
+#models-control-view .model-file-table td.sys-ftp-act .ftp-act-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: calc(50% - 3px);
+  height: 28px;
+  margin: 1px;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1;
+  text-align: center;
+}
+#models-control-view .model-file-table td.sys-ftp-act .ftp-act-btn + .ftp-act-btn { margin-left: 1px; }
+/* 当前生效文件标签换行到文件名下,不挤占操作列 */
+#models-control-view .model-cur-tag { display: inline-block; margin-left: 0; margin-top: 2px; }
+/* 文件名列宽 = 屏宽 - 操作列 - 左右留白 */
+#models-control-view .model-file-name { max-width: calc(100vw - 200px); }
+
+/* ═══════════════════════════════════════════════════════
+   「仿真」页签(v=1047):页签内 3D 视口 + 页内工具条
+   工具条控件收紧;启动卡片文案/按钮适配窄屏
+   ═══════════════════════════════════════════════════════ */
+#sim-control-view .sim-toolbar { gap: 5px; padding: 6px 6px; }
+#sim-control-view .sim-disabled-card { padding: 26px 18px 22px; }
+#sim-control-view .sim-disabled-title { font-size: 16px; }
+#sim-control-view .sim-disabled-desc { font-size: 12px; }
+#sim-control-view .sim-enable-btn { width: 100%; }
+
+/* ═══════════════════════════════════════════════
+   移动端布局优化(v=1049):横向溢出兜底 + 旧内核摇杆兜底
+   ═══════════════════════════════════════════════ */
+
+/* ── ① 横向溢出兜底 ───────────────────────────────────
+   .control-panel 为 overflow-y:auto(另一轴自动变 auto),
+   任何一行超宽都会让面板出现横向拖动。
+   以下三类“单行 nowrap”容器在 320~430px 下最易超宽 ── */
+/* 区块标题:style.css 为 flex 单行,右侧长状态/长提示把行撑宽时改为换行;
+   output 是 nowrap,不参与收缩(flex-shrink:0)而由换行解决 */
+.section-heading { flex-wrap: wrap; row-gap: 6px; }
+.section-heading > output { flex-shrink: 0; }
+/* 曲线工具条提示「滚轮缩放 · 双击复位」nowrap 且触屏上无意义:
+   隐藏可腾出约 110px,select+暂停+清除 才排得下 */
+.curves-hint { display: none; }
+/* 探针工具条(关节管理):style.css 为 flex-wrap:nowrap,
+   6 按钮 + 状态在手机上必溢 -> 允许换行 */
+.probe-toolbar { flex-wrap: wrap; row-gap: 8px; }
+/* 图例行:两枚以上图例在 320px 下贴边 -> 允许换行 */
+.curves-legend { flex-wrap: wrap; row-gap: 4px; }
+
+/* ── ② 旧内核摇杆兜底 ──────────────────────────────────
+   不支持 aspect-ratio(Chrome<88 / Safari<15)时 .joystick 高度为 0,
+   摇杆既看不见也点不中 -> 给固定高度兜底 ── */
+@supports not (aspect-ratio: 1 / 1) {
+  .joystick-dual .joystick { height: 158px; }
+}
+/* iOS 长按摇杆不弹出系统菜单/不选中文本,避免拖拽被系统手势打断 */
+.joystick { -webkit-touch-callout: none; }
+
+/* ═══════════════════════════════════════════════
+   数据看板 / 关节管理:消除横向滚动,一屏看全(v=1050 首版,v=1051 增补按字段视图)
+   ═══════════════════════════════════════════════ */
+
+/* ── ① 数据看板:13 列电机表 → 每台电机一张卡片 ──────
+   PC 版 head+数据行固定 min-width:620px,手机上必须左右滑。
+   改卡片后:
+     · 表头隐藏,字段名由 .dash-motor-val 的 data-label 经 ::before 回显
+     · 卡片首行 = 序号(#N) + 关节名 + CAN ID
+     · 10 个数值格各跨 2 列 → 每行 2 个「标签 数值」── */
+.dash-scroll { overflow-x: visible; }
+.dash-scroll .dashboard-motor-head { display: none; }
+.dash-scroll .dash-motor-row { min-width: 0; }
+
+.dash-motor-row {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px 6px;
+  align-items: center;
+  justify-items: stretch;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: rgba(11, 16, 24, 0.45);
+}
+/* 卡片首行三格:序号 / 关节名 / CAN ID(表头已隐藏,固定到第 1 行) */
+.dash-motor-idx  { grid-column: 1;     grid-row: 1; text-align: left; }
+.dash-motor-idx::before { content: '#'; margin-right: 1px; }
+.dash-motor-name { grid-column: 2 / 4; grid-row: 1; text-align: left; }
+.dash-motor-can  { grid-column: 4;     grid-row: 1; text-align: right; }
+
+.dash-motor-val {
+  grid-column: span 2;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.035);
+}
+.dash-motor-val::before {
+  content: attr(data-label);
+  color: var(--c-label);
+  font-size: 10px;
+  font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* ── ② 关节管理:保留 4 列(列=髋/大腿/小腿/轮,行=腿),压缩格内排版 ──
+   原溢出元凶是探针行两枚状态胶囊各 min-width:42px(42 + 间距 8 + 42 = 92px),
+   把格子撑到 ≈ 95px 最小宽,4 列 ≈ 404px 必然横滑。
+   这里不动列数——4 列才能让同关节跨腿纵向对齐(对比「相同项」),
+   改为:状态胶囊在格内竖排 + 收缩字号/min-width,单格最小宽降到 ≈ 56px,
+   4 列 ≈ 224 + 间距 18 ≈ 242px,一屏放下且列对齐不丢。── */
+.zero-motor-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.zero-grid-header span { font-size: 11px; }
+.zero-motor-cell { padding: 6px 4px; gap: 2px; }
+.zero-motor-cell .zero-name { font-size: 12px; }
+.zero-motor-cell .zero-mid { top: 3px; right: 4px; font-size: 9px; }
+.zero-motor-cell .zero-pos { font-size: 10.5px; }
+.zero-motor-cell .zero-probe-row { flex-direction: column; gap: 1px; margin-top: 1px; }
+.zero-motor-cell .zero-probe-state,
+.zero-motor-cell .zero-zero-state { min-width: 0; font-size: 10px; line-height: 1.2; }
 
+/* ═══════════════════════════════════════════════
+   数据看板:视图切换 + 「按字段」4×4 同指标比对网格(v=1051)
+   卡片式把同一字段拆散到各卡片、无法逐列比对,这里补一个
+   行=FL/FR/RL/RR、列=髋/大腿/小腿/轮 的矩阵,一次只显示一个
+   指标的全 16 台电机值(与关节管理置零矩阵同构)。
+   ═══════════════════════════════════════════════ */
+
+/* ── 视图切换条 + 指标 chips ── */
+.dash-view-bar { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; }
+.dash-view-switch { display: flex; gap: 6px; }
+.dash-view-btn {
+  flex: 1 1 0;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--c-label);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+}
+.dash-field-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.dash-field-chip {
+  padding: 3px 9px;
+  font-size: 11px;
+  color: var(--c-label);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+}
+.dash-view-btn.is-active,
+.dash-field-chip.is-active {
+  color: #fff;
+  background: rgba(90, 160, 255, 0.18);
+  border-color: rgba(90, 160, 255, 0.55);
+}
+
+/* ── 4×4 值格矩阵 ── */
+.dashboard-field-grid {
+  display: grid;
+  grid-template-columns: auto repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+.dash-field-corner { min-width: 32px; }
+.dash-field-colhead,
+.dash-field-rowhead {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--c-label);
+}
+.dash-field-rowhead { min-width: 32px; font-weight: 600; letter-spacing: 0.3px; }
+.dash-field-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 3px 2px;
+  font-family: monospace;
+  font-size: 11px;
+  color: #e8f0ff;
+  background: rgba(11, 16, 24, 0.45);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+}
+.dash-field-cell.is-wheel { border-style: dashed; }            /* 足端轮(驱动轮)与腿关节区分 */
+.dash-field-cell.is-empty { opacity: 0.35; }
+.dash-field-cell.is-warn { color: #ffb020; border-color: rgba(255, 176, 32, 0.5); }
+.dash-field-cell.is-danger { color: #ff6b6b; border-color: rgba(255, 107, 107, 0.6); }
+.dash-field-cell.is-waiting { color: var(--c-label); }
+.dash-field-cell.is-stale { color: var(--c-danger); border-color: rgba(224, 112, 112, 0.6); }
+.dash-field-cell.is-alarmed { box-shadow: inset 0 0 0 1px rgba(255, 107, 107, 0.7); }
+
+/* [hidden] 兜底:防止别处的 display 规则压过 hidden,保证视图切换可靠生效 */
+.dash-view-bar[hidden],
+.dash-field-chips[hidden],
+.dash-scroll[hidden],
+.dashboard-field-grid[hidden] { display: none !important; }
+
+/* ═══════════════════════════════════════════════════════
+   遥控学习页签 · 移动端「已学码」表格 → 卡片
+   根因: .sys-svclist-wrap(table-layout:fixed + overflow:hidden + nowrap) 把
+   6 列等分后「操作」列只剩约 56px,发送/连发/重命名/删除 4 个按钮被整列裁掉,
+   移动端因此完全够不到「发送」。改为每行一张卡片:HEX 输入整行、按钮整行等分。
+   ═══════════════════════════════════════════════════════ */
+#rc-table thead { display: none; }
+#rc-table,
+#rc-table tbody { display: block; }
+#rc-table {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+#rc-table tr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  margin: 0 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+#rc-table td {
+  display: block;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+#rc-table td[colspan] { flex: 1 1 100%; text-align: center; padding: 6px 0; }
+/* ① ID 徽标 ② 名称占满剩余 ④次数 ⑤时间 */
+#rc-table td:nth-child(1) {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #7fd1ff;
+  background: rgba(127, 209, 255, 0.12);
+  border-radius: 4px;
+}
+#rc-table td:nth-child(2) { flex: 1 1 auto; font-size: 13px; }
+/* ④ 时间列可收缩:防止长字符串把整行撑出卡片宽度(撑宽后会被外层 overflow:hidden 裁掉) */
+#rc-table td:nth-child(4) {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--c-label);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* ③ HEX 可编辑输入:整行;与行内「保存」按钮同排(输入框收缩让出按钮宽度,
+   flex-basis 必须为 0,否则 width:100% 会把按钮挤出卡片外) */
+#rc-table td:nth-child(3) { flex: 1 1 100%; display: flex; align-items: center; gap: 6px; }
+#rc-table .rc-hex-input {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  max-width: none !important;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+#rc-table .rc-hex-commit {
+  flex: 0 0 auto;
+  min-width: 52px;
+  padding: 4px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+/* ⑤ 操作按钮:整行等分,保证 3 颗按钮文字完整、始终可见可点。
+   注意:上面给 td 设了 white-space:normal,按钮会继承它 → 「重命名」被折成两行;
+   且 flex:1 1 0 + min-width:0 会把按钮压到 1 个字宽。这里显式 nowrap 并给
+   58px 基宽:空间不足时整排换行(2×2),而不是把按钮压扁/截断。 */
+#rc-table td:nth-child(5) {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#rc-table td:nth-child(5) .ros-btn {
+  flex: 1 1 58px;
+  min-width: 58px;
+  padding: 4px 2px;
+  font-size: 11px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+/* ── 遥控学习 · 移动端工具栏排版 ──
+   桌面端每个控件用内联 max-width 写死宽度(160/130px),窄屏下会挤成
+   参差的多行。此处统一解除宽度硬限并按语义分行:输入框吃剩余宽度,
+   主操作按钮占半行,保证拇指可点、视线顺。 */
+#rc-control-view .sys-power-bar {
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  align-items: center;
+}
+/* ① 设备状态:pill + 设备路径同排(路径吃掉剩余宽度) */
+#rc-control-view #rc-dev-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+}
+/* ② 命名、学习、发送、保存与清除:名称 / 待保存 hex 各占半行,四颗按钮同排各占约四分之一 */
+#rc-control-view #rc-name-input,
+#rc-control-view #rc-pending-hex {
+  flex: 1 1 45%;
+  max-width: none !important;
+  min-width: 0;
+}
+#rc-control-view #rc-learn-btn,
+#rc-control-view #rc-test-btn,
+#rc-control-view #rc-save-btn,
+#rc-control-view #rc-clear-btn { flex: 1 1 22%; }

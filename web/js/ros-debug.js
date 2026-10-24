@@ -11,7 +11,7 @@
  *
  * 断开时自动清理 UI。
  */
-import { getRosClient, addStatusListener, addRawMessageListener, connectionStatus } from './ros-bridge.js?v=981';
+import { getRosClient, addStatusListener, addRawMessageListener, connectionStatus } from './ros-bridge.js?v=2026102001';
 
 // ── 协议通道全集 ────────────────────────────────────────────
 /** 下行通道(服务器 → 页面) */
@@ -22,7 +22,6 @@ const RX_CHANNELS = [
   { name: 'feedback',           type: 'string 指令应答' },
   { name: 'notify',             type: 'string(JSON) 通知事件' },
   { name: 'check_stand_result', type: 'string(JSON) 站立检查结果' },
-  { name: 'briefing_status',    type: 'string 播报状态' },
 ];
 /** 上行通道(页面 → 服务器) */
 const TX_CHANNELS = [
@@ -31,7 +30,6 @@ const TX_CHANNELS = [
   { name: 'imu_stream', type: '{"data":true} IMU 流开关' },
   { name: 'notify_ack', type: '{"data":"{\\"id\\":1,\\"ok\\":true}"} 通知回复' },
   { name: 'check_stand', type: '站立检查触发(无需 data)' },
-  { name: 'briefing',   type: '{"data":"elevator"} 播报命令' },
 ];
 
 // ── DOM 引用(initRosDebug 时填充) ─────────────────────────

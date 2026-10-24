@@ -17,7 +17,7 @@ import {
   addStatusListener,
   addLidarFrameListener, addLidarImuListener,
   setLidarEnabled,
-} from './ros-bridge.js?v=981';
+} from './ros-bridge.js?v=2026102001';
 
 let viewVisible = false;
 let rosOnline = false;

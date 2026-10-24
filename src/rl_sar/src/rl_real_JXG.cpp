@@ -1,12 +1,22 @@
 #include "rl_real_JXG.hpp"
+#include "crash_dump.hpp"
 #include "motor_manager.h"
 #include <csignal>
 #include <atomic>
+#include <thread>
 #include <functional>
 #include <string>
 #include <sstream>
 #include <cctype>
 #include <algorithm>
+
+// 版本/构建时间宏兜底(正常由 CMake target_compile_definitions 提供;
+// 仅当绕过 CMake 直接编译时启用,避免未定义报错)
+#ifndef APP_VERSION
+#define APP_VERSION "0.0.0-dev"
+#define BUILD_NUMBER "unknown"
+#define BUILD_TIMESTAMP "unknown"
+#endif
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -15,24 +25,97 @@
 #include <mutex>
 #include <fstream>
 #include <ctime>
+#include <sys/stat.h>
 #include <sys/mman.h>
 #include <cstring>
+#include <cerrno>
+#include <cstdlib>  // std::getenv
+#include <sys/resource.h>  // 常驻分段诊断:getrusage(RUSAGE_THREAD)
+#include <sched.h>         // sched_setaffinity/CPU_SET:大小核布局
+#include <dirent.h>        // opendir/readdir:遍历 /proc/self/task 纠正预存线程 affinity
+#include <unistd.h>        // getpid
+#include <sys/syscall.h>   // SYS_gettid
 
 RobotMotorManager motor_manager;
 
 std::atomic<bool> g_shutdown_flag(false);
+std::atomic<bool> g_affinity_watchdog_exit(false);
 
-// 上位机 cmd_vel 命令超时保护：超过该时长未收到新的 cmd_vel，自动归零速度，
-// 防止上位机(Web 调试台 websocket)断开后机器狗保持最后一条速度指令持续前冲。
-// 上位机若以低于 2Hz 发送 cmd_vel，请适当调大该值。
-static constexpr double kCmdVelTimeoutSec = 0.5;
+// ===== 编译层选择(v4: 两层解耦,可独立开关,也可共存) =====
+// JXG_ROS_LAYER: ROS2 真实控制(USE_ROS2_REAL_CONTROL)模式,话题/ROS 消息收发
+// JXG_WEB_LAYER: 内置 Web 调试台(HTTP 静态页 + WebSocket),由 CMake 选项
+//                ENABLE_WEB_BRIDGE(宏 JXG_ENABLE_WEB_BRIDGE)独立控制。
+// v3 及之前 WEB == !ROS 互斥; v4 起两宏可同时为 1: 同一进程内 ROS2 话题与
+// WebSocket 同时收发(发送点双发、输入点经统一入口合流)。
+#if defined(USE_ROS2_REAL_CONTROL)
+#define JXG_ROS_LAYER 1
+#else
+#define JXG_ROS_LAYER 0
+#endif
+#if defined(JXG_ENABLE_WEB_BRIDGE)
+#define JXG_WEB_LAYER 1
+#else
+#define JXG_WEB_LAYER 0
+#endif
 
-// steady_clock 秒（用于 cmd_vel 超时与通知重试节拍）
+// 单调时钟当前秒数(非 ROS 模式下替代 rclcpp Node::now(),用于 notify 重试/超时计时)
 static double SteadyNowSec()
 {
     return std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+               std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+// 执行 shell 命令并返回 stdout(失败返回空串)。仅用于系统管理类命令(svc/ps/sysinfo),
+// 调用方必须对参数做白名单校验,禁止把用户原始字符串直接拼进命令。
+static std::string ExecShell(const std::string &cmd)
+{
+    std::string out;
+    FILE *fp = popen(cmd.c_str(), "r");
+    if (!fp) return out;
+    char buf[1024];
+    while (fgets(buf, sizeof(buf), fp)) out.append(buf);
+    pclose(fp);
+    return out;
+}
+
+// systemd unit 名称白名单:只允许 字母/数字/.-@_ ,防注入(svc 命令的 unit 参数)
+static bool IsValidUnitName(const std::string &s)
+{
+    if (s.empty() || s.size() > 128) return false;
+    for (char c : s)
+        if (!(isalnum((unsigned char)c) || c == '.' || c == '-' || c == '_' || c == '@'))
+            return false;
+    return true;
+}
+
+// 上位机 cmd_vel 命令超时保护：超过该时长未收到新的 cmd_vel，自动归零速度，
+// 防止上位机(rosbridge websocket)断开后机器狗保持最后一条速度指令持续前冲。
+// 上位机若以低于 2Hz 发送 cmd_vel，请适当调大该值。
+static constexpr double kCmdVelTimeoutSec = 0.5;
+
+// Web 速度独占保持时长:收到「非零」Web 速度后,该时间内 ROS cmd_vel 被丢弃(Web 独占)。
+// 网页按住摇杆以 20Hz 持续发非零帧(间隔 50ms),故操控期间独占一直续期;松手补发 5 帧
+// 零速(约 250ms)后停发,本窗口(1s)过后自动释放,ROS 恢复控制。取 1s 远大于发送间隔、
+// 又略晚于 0.5s 断联归零,保证"先停车、后还权"。
+static constexpr double kWebExclusiveHoldSec = 1.0;
+
+// cmd_vel 死区(JXG 轮速失控热修改 1, 2026-10-02):
+// 手柄/摇杆零位漂移(经 commands_scale 放大后)会被策略当成有效指令,
+// 零命令时仍输出大幅轮速。|v| < 0.05 一律归零,ROS / Web 两条指令链路共用。
+static constexpr float kCmdVelDeadzone = 0.05f;
+static inline float ApplyDeadzone(float v)
+{
+    return std::abs(v) < kCmdVelDeadzone ? 0.0f : v;
+}
+
+// 轮速目标低通滤波系数(JXG 轮速失控热修改 2):
+// loop_rl 以 dt*decimation = 0.005*4 = 20ms(50Hz)运行,
+// alpha=0.3 时等效时间常数 tau≈2.8*20ms≈56ms,截止频率≈2.8Hz,
+// 用于压掉策略轮速目标的高频抖动;若觉得影响平衡响应可调大(趋向 1=不滤波)。
+static constexpr float kWheelVelLpfAlpha = 0.3f;
+// RunModel 中断超过该时长(策略退出/重入)后,滤波器状态作废,首拍直接跟踪原始值,
+// 避免用退出前的陈旧轮速做插值造成起步突变。
+static constexpr double kWheelLpfResetGapSec = 0.1;
 
 // 最小 JSON 转义（反斜杠、双引号），用于无第三方 JSON 库时手动拼 JSON
 static std::string JsonEscape(const std::string &s)
@@ -54,13 +137,28 @@ static std::string JsonEscape(const std::string &s)
   }
 
 
-RL_Real::RL_Real(bool wheel_mode, const WebConfig &web_cfg)
+RL_Real::RL_Real(const WebConfig &web_cfg)
+#if defined(USE_ROS2_REAL_CONTROL) || (defined(USE_ROS2) && defined(USE_ROS))
+    : rclcpp::Node("rl_real_node")
+#endif
 {
     this->ang_vel_axis = "body";
-    this->robot_name = wheel_mode ? "JXGw" : "JXG";
+    // v5: 仅保留 JXGw 轮腿模型,启动即执行,不再通过命令行参数选择
+    this->robot_name = "JXGw";
     this->ReadYaml(this->robot_name, "base.yaml");
     this->InitJointNum(this->params.Get<int>("num_of_dofs"));
-    this->CacheHotParams();
+
+    // 一次性缓存 200Hz 实时环用到的静态参数(此后 GetState/SetCommand 不再解析 YAML/分配 vector)
+    this->cfg_num_dofs = this->params.Get<int>("num_of_dofs");
+    this->cfg_joint_mapping = this->params.Get<std::vector<int>>("joint_mapping");
+    this->cfg_lying_offset = this->params.Get<std::vector<float>>("lying_down_offset");
+    this->InitDiffDrive();
+    // 下发缓冲区按 CAN 电机总数 16 分配(sendAllMotorsCommand 以 CAN idx 索引且要求 size==16)
+    this->cmd_tau_buf.assign(16, 0.0f);
+    this->cmd_vel_buf.assign(16, 0.0f);
+    this->cmd_pos_buf.assign(16, 0.0f);
+    this->cmd_kp_buf.assign(16, 0.0f);
+    this->cmd_kd_buf.assign(16, 0.0f);
 
     // FSM
     if (FSMManager::GetInstance().IsTypeSupported(this->robot_name))
@@ -69,126 +167,273 @@ RL_Real::RL_Real(bool wheel_mode, const WebConfig &web_cfg)
         if (fsm_ptr) this->fsm = *fsm_ptr;
     }
 
-    // 硬件初始化
-    motor_manager.init();
-   
-    motor_manager.startThreads(); 
+    // 硬件初始化(v7.2: 传输层由 base.yaml 的 can_transport 决定: usb2can|socketcan)
+    motor_manager.init(this->params.Get<std::string>("can_transport"));
 
-    motor_manager.initAllMotors();
-
-    // 一次性电机零位检查：等待反馈稳定后检测
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    this->motors_ready_for_stand = this->CheckMotorInitPosition(1.0f);  // 阈值1.0rad
-    if (this->motors_ready_for_stand) {
-        std::cout << "[INIT] Motor position check PASSED" << std::endl;
-    } else {
-        std::cout << "[INIT] Motor position check FAILED: " << this->motors_not_ready_reason << std::endl;
+    // 先装填首帧安全指令,再启动 500Hz 腿线程:这样线程从第一拍起发送的就是
+    // kp=0/kd=20 纯阻尼帧(配合 LegCommand 零初始化),杜绝"使能瞬间槽内是
+    // 未初始化增益"的砸地窗口。电机未使能时这些帧不产生力矩,仅驱动状态帧回流。
+    this->InitLowCmd();
+    {
+        std::vector<float> tau_z(16, 0.0f), vel_z(16, 0.0f);
+        std::vector<float> kp_z(16, 0.0f), kd_damp(16, 20.0f), q_init(16, 0.0f);
+        for (int i = 0; i < 16; ++i) q_init[i] = this->JXG_cmd.motor_cmd[i].q;
+        motor_manager.sendAllMotorsCommand(tau_z, vel_z, q_init, kp_z, kd_damp);
     }
 
+    motor_manager.startThreads();
+
+    // 等待状态帧回流(崩溃前仍处使能的电机会持续应答;冷机未使能则为零反馈)
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // IMU 提前到使能之前启动:SafeHold 首拍及 RobotControl 的 IMU 掉线保护立即可用
     open_imu();
 
     this->loop_imu = std::make_shared<LoopFunc>("loop_imu", 0.001, []() {
         read_imu();  // 1kHz
     }, 4 /*CPU*/, 90 /*FIFO 最高:IMU 采样*/);
     this->loop_imu->start();
-    this->InitLowCmd();
-    std::vector<float> pos(16, 0.0f);
-    std::vector<float> tau(16, 0.0f), vel(16, 0.0f), kp(16, 0.0f), kd(16, 20.0f);
-    for (int i = 0; i < 16; ++i) {
-        pos[i] = this->JXG_cmd.motor_cmd[i].q;
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // ★ 崩溃重启安全核心:使能前判定当前是否为站立构型。
+    std::vector<float> startup_hold_q;
+    this->startup_standing_ = this->DetectStandingStartup(startup_hold_q);
+    if (this->startup_standing_)
+    {
+        // 预装填"当前位 PD 保持"帧:每个电机被 0xFC 使能后的第一拍即收到
+        // kp=fixed_kp/q=实测角 的保持指令,而不是默认 kp=0 阻尼(站立会砸地)。
+        std::vector<float> tau_z(16, 0.0f), vel_z(16, 0.0f);
+        auto fkp = this->params.Get<std::vector<float>>("fixed_kp");
+        auto fkd = this->params.Get<std::vector<float>>("fixed_kd");
+        if (fkp.size() != 16) fkp.assign(16, 0.0f);
+        if (fkd.size() != 16) fkd.assign(16, 1.0f);
+        motor_manager.sendAllMotorsCommand(tau_z, vel_z, startup_hold_q, fkp, fkd);
+        this->motors_ready_for_stand = true;  // 已在站立位,无需近零位门禁
+        std::cout << LOGGER::WARNING << "[INIT] STANDING posture detected BEFORE motor enable: "
+                     "motors will hold current pose during/after enable (SafeHold)." << std::endl;
     }
-    for (int i = 0; i < 100; ++i) {
-        motor_manager.sendAllMotorsCommand(tau, vel, pos, kp, kd);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    // 逐个使能 16 台电机(16x100ms≈1.6s)。使能瞬间 500Hz 指令流已是保持帧/阻尼帧。
+    motor_manager.initAllMotors();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // ★ 使能后反馈验证:等待所有电机反馈回流,避免 CAN 链路未恢复时
+    //   CheckMotorInitPosition 读到默认零值误判通过。
+    {
+        constexpr int kWaitFeedbackTimeoutMs = 3000;   // 最多等 3s
+        constexpr int kWaitFeedbackStepMs    = 50;     // 50ms 轮询
+        constexpr int64_t kFeedbackFreshMs   = 200;    // 反馈新鲜度阈值
+        int waited = 0;
+        while (waited < kWaitFeedbackTimeoutMs)
+        {
+            int n_no_fb = 0;
+            for (int i = 0; i < 16; ++i)
+            {
+                int64_t age = motor_manager.motorFeedbackAgeMs(i);
+                if (age < 0 || age > kFeedbackFreshMs) ++n_no_fb;
+            }
+            if (n_no_fb == 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(kWaitFeedbackStepMs));
+            waited += kWaitFeedbackStepMs;
+        }
+        // 报告仍无反馈的电机(不阻塞启动,但标记 motors_ready_for_stand=false)
+        std::vector<int> no_fb_ids;
+        for (int i = 0; i < 16; ++i)
+        {
+            int64_t age = motor_manager.motorFeedbackAgeMs(i);
+            if (age < 0 || age > kFeedbackFreshMs) no_fb_ids.push_back(i);
+        }
+        if (!no_fb_ids.empty())
+        {
+            std::ostringstream oss;
+            oss << "[INIT] WARNING: " << no_fb_ids.size()
+                << " motor(s) still no feedback after enable:";
+            for (int id : no_fb_ids) oss << " m" << id;
+            std::cout << oss.str() << std::endl;
+            this->motors_not_ready_reason =
+                "Motor(s) no feedback after enable:" + oss.str().substr(oss.str().find(":"));
+            this->motors_ready_for_stand = false;
+        }
+        else
+        {
+            std::cout << "[INIT] All 16 motors feedback confirmed after enable ("
+                      << waited << "ms)" << std::endl;
+        }
+    }
+
+    if (!this->startup_standing_)
+    {
+        // 非站立路径:沿用原一次性零位检查语义(使能、反馈稳定后判定)
+        this->motors_ready_for_stand = this->CheckMotorInitPosition(1.0f);  // 阈值1.0rad
+        if (this->motors_ready_for_stand) {
+            std::cout << "[INIT] Motor position check PASSED" << std::endl;
+        } else {
+            std::cout << "[INIT] Motor position check FAILED: " << this->motors_not_ready_reason << std::endl;
+        }
+    }
+
+    // 使能后 500ms 安全桥接(100 拍):
+    //  - 站立:重新抓取使能后的最新关节角,以 fixed_kp/fixed_kd 持续保持;
+    //  - 其他:kp=0/kd=20 纯阻尼。
+    // 腿线程会以 500Hz 持续重放最后一帧,故本桥接结束到控制环首拍之间
+    // (InitOutputs/InitControl/ROS/Web 初始化,数百 ms)电机也不会失控。
+    {
+        std::vector<float> tau(16, 0.0f), vel(16, 0.0f), kp(16, 0.0f), kd(16, 20.0f), pos(16, 0.0f);
+        if (this->startup_standing_)
+        {
+            Eigen::VectorXf cur_pos = motor_manager.getAllMotorPos();
+            for (int i = 0; i < 16; ++i) startup_hold_q[i] = cur_pos[i];
+            auto fkp = this->params.Get<std::vector<float>>("fixed_kp");
+            auto fkd = this->params.Get<std::vector<float>>("fixed_kd");
+            if (fkp.size() != 16) fkp.assign(16, 0.0f);
+            if (fkd.size() != 16) fkd.assign(16, 1.0f);
+            pos = startup_hold_q;
+            kp  = fkp;
+            kd  = fkd;
+        }
+        else
+        {
+            for (int i = 0; i < 16; ++i) pos[i] = this->JXG_cmd.motor_cmd[i].q;
+        }
+        for (int i = 0; i < 100; ++i) {
+            motor_manager.sendAllMotorsCommand(tau, vel, pos, kp, kd);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    // 控制环首拍前预置 FSM:站立→SafeHold(200Hz 接管保持),否则保持 Passive。
+    // 首拍 CHANGE 分支直接 Passive.Exit→SafeHold.Enter,Passive.Run 的 kp=0
+    // 卸力帧一帧都不会发出。
+    if (this->startup_standing_)
+    {
+        this->fsm.RequestStateChange("RLFSMStateSafeHold");
     }
 
 
     this->InitOutputs();
     this->InitControl();
 
-    // ===== 内置 Web 调试台桥（HTTP 静态页面 + WebSocket 控制/遥测，替代 ROS2 + rosbridge） =====
-    // 场景音频播放（预设 wav + Web 触发，输出 USB 声卡 card3；音频目录不存在时优雅降级）
-    {
-        struct stat st;
-        if (::stat(web_cfg.briefing_audio_dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
-            this->briefing_audio_ = std::make_unique<rl_briefing::BriefingAudioPlayer>(
-                web_cfg.briefing_audio_dir, "plughw:3,0", 48000, 2);
-        } else {
-            std::cout << LOGGER::WARNING << "Briefing audio dir not found: "
-                      << web_cfg.briefing_audio_dir << " (briefing playback disabled)" << std::endl;
-        }
+#if defined(USE_ROS2_REAL_CONTROL)
+    auto ros_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile();
+    this->cmd_vel_subscriber = this->create_subscription<geometry_msgs::msg::Twist>(
+        "/rl_real/cmd_vel", ros_qos, std::bind(&RL_Real::CmdvelCallback, this, std::placeholders::_1));
+    // 网页独占速度源(standalone web_server 转发浏览器 WS cmd_vel 到此)。
+    this->web_cmd_vel_subscriber = this->create_subscription<geometry_msgs::msg::Twist>(
+        "/rl_real/web_cmd_vel", ros_qos, std::bind(&RL_Real::WebCmdVelRosCallback, this, std::placeholders::_1));
+    this->command_subscriber = this->create_subscription<std_msgs::msg::String>(
+        "/rl_real/command", ros_qos, std::bind(&RL_Real::CommandCallback, this, std::placeholders::_1));
+    this->imu_stream_subscriber = this->create_subscription<std_msgs::msg::Bool>(
+        "/rl_real/imu_stream_enable", ros_qos, std::bind(&RL_Real::ImuStreamCallback, this, std::placeholders::_1));
+    this->feedback_publisher = this->create_publisher<std_msgs::msg::String>(
+        "/rl_real/feedback", ros_qos);
+    this->motor_state_publisher = this->create_publisher<std_msgs::msg::Float32MultiArray>(
+        "/rl_real/motor_state", ros_qos);
+    this->imu_state_publisher = this->create_publisher<std_msgs::msg::Float32MultiArray>(
+        "/rl_real/imu_state", ros_qos);
+    this->pose2d_publisher = this->create_publisher<std_msgs::msg::Float32MultiArray>(
+        "/rl_real/pose2d", ros_qos);
+    this->notify_publisher = this->create_publisher<std_msgs::msg::String>(
+        "/rl_real/notify", ros_qos);
+    this->notify_ack_subscriber = this->create_subscription<std_msgs::msg::String>(
+        "/rl_real/notify_ack", ros_qos, std::bind(&RL_Real::NotifyAckCallback, this, std::placeholders::_1));
+    this->check_stand_subscriber = this->create_subscription<std_msgs::msg::String>(
+        "/rl_real/check_stand", ros_qos, std::bind(&RL_Real::CheckStandCallback, this, std::placeholders::_1));
+    this->check_stand_result_publisher = this->create_publisher<std_msgs::msg::String>(
+        "/rl_real/check_stand_result", ros_qos);
+    // 姿态接口: 8Hz 周期广播 + posture 命令即时应答
+    this->posture_publisher = this->create_publisher<std_msgs::msg::String>(
+        "/rl_real/posture", ros_qos);
+    // 站立期望值校验(与趴姿检查对称): 请求 /rl_real/check_standing → 结果 /rl_real/check_standing_result
+    this->check_standing_subscriber = this->create_subscription<std_msgs::msg::String>(
+        "/rl_real/check_standing", ros_qos, std::bind(&RL_Real::CheckStandingCallback, this, std::placeholders::_1));
+    this->check_standing_result_publisher = this->create_publisher<std_msgs::msg::String>(
+        "/rl_real/check_standing_result", ros_qos);
+    // BMS 电池状态:web_server 1Hz 发布,用于低电量持续报警
+    this->bms_state_subscriber = this->create_subscription<std_msgs::msg::Float32MultiArray>(
+        "/rl_real/bms_state", ros_qos, std::bind(&RL_Real::BmsStateCallback, this, std::placeholders::_1));
+    // 命令生命周期合成层 + 2Hz 心跳(与 WebSocket 同帧双发, 大脑 HAL/桥硬依赖)
+    this->cmd_state_publisher = this->create_publisher<std_msgs::msg::String>(
+        "/rl_real/cmd_state", ros_qos);
+    this->heartbeat_publisher = this->create_publisher<std_msgs::msg::String>(
+        "/rl_real/heartbeat", ros_qos);
+    // safe_getup 编排推进:50ms 周期。SingleThreadedExecutor 下与命令回调同线程,
+    // 阶段切换/SetKeyboard 与手动命令完全串行,无需互斥锁(探针线程仅写 atomic)。
+    this->safe_getup_timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(50), [this]() { this->TickSafeGetup(); });
+    // v4 共存: 初始零位 Notify 由 Web 块统一双发; 仅纯 ROS 构建走这里。
+#if !JXG_WEB_LAYER
+    std::cout << LOGGER::INFO << "ROS2 real control enabled: /rl_real/cmd_vel, /rl_real/command, /rl_real/feedback, /rl_real/motor_state, /rl_real/imu_state, /rl_real/pose2d, /rl_real/posture, /rl_real/check_standing" << std::endl;
+    // 初始零位检查结果上报（发布器就绪后补发一次）
+    if (this->motors_ready_for_stand) {
+        this->Notify("info", "motor position check passed");
+    } else {
+        this->Notify("error", this->motors_not_ready_reason);
     }
+#endif
+#endif
+
+#if JXG_WEB_LAYER
+    // ===== 内置 Web 调试台桥（HTTP 静态页面 + WebSocket 控制/遥测，替代 ROS2 + rosbridge） =====
+    // 独立 web_server 进程(jxg-web.service)已常驻时, 通过 JXG_WEB_STANDALONE=1 让位:
+    // 本进程不再内嵌 Web, 全部 Web 流量经 ROS2 话题由独立进程桥接,
+    // 这样重启本控制程序时浏览器的 WS/WebSSH/WebFTP 连接完全不受影响。
+    bool embedded_web_disabled = false;
+    if (const char *e = std::getenv("JXG_WEB_STANDALONE"))
+        embedded_web_disabled = (e[0] == '1' || e[0] == 't' || e[0] == 'T' || e[0] == 'y' || e[0] == 'Y');
+    if (embedded_web_disabled)
+    {
+        std::cout << LOGGER::INFO
+                  << "Embedded web bridge disabled (JXG_WEB_STANDALONE=1); "
+                     "web console served by standalone web_server process" << std::endl;
+    }
+    else
+    {
     this->web_bridge_ = std::make_unique<WebBridge>();
     this->last_cmd_vel_time_ = std::chrono::steady_clock::now();
     if (!this->web_bridge_->start(
             web_cfg.web_port, web_cfg.web_root,
-            // cmd_vel
-            [this](const CmdVel &v) { this->CmdvelCallback(v); },
-            // command（原 /rl_real/command 字符串）
-            [this](const std::string &s) { this->ApplyCommand(s); },
-            // imu_stream 开关
-            [this](bool b) { this->ImuStreamCallback(b); },
-            // notify_ack（原 JSON 字符串）
-            [this](const std::string &s) { this->NotifyAckCallback(s); },
-            // check_stand
-            [this]() { this->CheckStandCallback(); },
-            // briefing 播报
-            [this](const std::string &s) { this->BriefingCallback(s); }))
+            [this](const WebBridge::CmdVel &v) { this->WebCmdvelCallback(v); },
+            [this](const std::string &s, int seq) { this->ApplyRosCommand(s, seq); },
+            [this](bool b) {
+                SetJXGIMUStreamEnabled(b);
+                this->PublishRosFeedback(std::string("imu_stream=") + (b ? "on" : "off"));
+            },
+            [this](const std::string &s) { this->HandleNotifyAck(s); },
+            [this]() { this->HandleCheckStand(); }))
     {
         std::cout << LOGGER::WARNING << "Web bridge failed to start (port "
                   << web_cfg.web_port << " in use?), web console disabled" << std::endl;
         this->web_bridge_.reset();
     }
     std::cout << LOGGER::INFO << "Web control enabled: cmd_vel, command, feedback, motor_state, imu_state, pose2d" << std::endl;
-    // 初始零位检查结果上报（桥就绪后补发一次）
+    // 初始零位检查结果上报（Web 桥就绪后补发一次）
     if (this->motors_ready_for_stand) {
         this->Notify("info", "motor position check passed");
     } else {
         this->Notify("error", this->motors_not_ready_reason);
     }
+    }  // end else: 内嵌 Web 未被 JXG_WEB_STANDALONE 禁用
+#endif
 
-    xbox_gamepad = std::make_unique<XboxGamepad>(0);
-    loop_gamepad = std::make_shared<LoopFunc>("loop_gamepad", 0.005, [this]() {
-        if (xbox_gamepad && xbox_gamepad->connected)
-        {
-            xbox_gamepad->update();
-            last_gamepad_state = gamepad_state;
-            gamepad_state = xbox_gamepad->state;
-
-
-        //  static int cnt = 0;
-        // if (++cnt % 40 == 0)
-        //     {  // 每 200ms打印一次
-        //         printf("Xbox connected | "
-        //             "A:%d B:%d X:%d Y:%d "
-        //             "LB:%d RB:%d L3:%d R3:%d Start:%d Back:%d "
-        //             "LStick:%.2f,%.2f RStick:%.2f,%.2f "
-        //             "DPad U:%d D:%d L:%d R:%d\n",
-        //             gamepad_state.A, gamepad_state.B, gamepad_state.X, gamepad_state.Y,
-        //             gamepad_state.LB, gamepad_state.RB, gamepad_state.L3, gamepad_state.R3,
-        //             gamepad_state.start, gamepad_state.back,
-        //             gamepad_state.left_x, gamepad_state.left_y,
-        //             gamepad_state.right_x, gamepad_state.right_y,
-        //             gamepad_state.up, gamepad_state.down, gamepad_state.left, gamepad_state.right
-        //         );
-        //     }
-        }
-        else {
-            static int cnt2 = 0;
-            if (++cnt2 % 200 == 0) printf("Xbox NOT connected!\n");
-        }
-    }, -1 /*不绑核*/, -1 /*手柄输入非硬实时:SCHED_OTHER(nice 继承服务 -10),可被全部 FIFO 线程抢占*/);
-    loop_gamepad->start();
-
-    // 键盘线程已禁用，使用Xbox手柄控制
     // this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Real::KeyboardInterface, this));
     this->loop_control  = std::make_shared<LoopFunc>("loop_control",  this->params.Get<float>("dt"), std::bind(&RL_Real::RobotControl, this),
-                                                     4 /*CPU:与 loop_imu 同核,共享状态 cache*/, 80 /*FIFO:200Hz 控制环*/);
+                                                     6 /*CPU:独占大核,200Hz 控制环无推理/IMU 干扰*/, 80 /*FIFO:200Hz 控制环*/);
     this->loop_rl       = std::make_shared<LoopFunc>("loop_rl",       this->params.Get<float>("dt") * this->params.Get<int>("decimation"), std::bind(&RL_Real::RunModel, this),
-                                                     6 /*CPU:推理独占核*/, 70 /*FIFO:50Hz ONNX 推理*/);
+                                                     4 /*CPU:与 loop_imu 共存,IMU 负载~10% 不影响推理;control 独占 CPU6*/, 70 /*FIFO:50Hz ONNX 推理*/);
     // this->loop_keyboard->start();
     this->loop_control->start();
     this->loop_rl->start();
+
+    // ── 周期性电机重使能线程(普通调度,不抢占 RT 线程) ──
+    // 使能命令 0xFC 仅在启动时发一次;若电机上电晚于使能(电源顺序)或使能帧丢失,
+    // 电机不进入 MIT 模式,后续所有命令被忽略。本线程每 5 秒重发一轮 0xFC,
+    // 覆盖迟到上电的电机。对已使能电机幂等无害。
+    std::thread([](){
+        while (rclcpp::ok()) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            try { motor_manager.periodicReEnable(); } catch (...) {}
+        }
+    }).detach();
 
 #ifdef ENABLE_HR_LOGGER
     this->HrLogInit();
@@ -241,7 +486,6 @@ RL_Real::~RL_Real()
     this->loop_control->shutdown();
     this->loop_rl->shutdown();
     // this->loop_keyboard->shutdown();  // 键盘线程已禁用
-    this->loop_gamepad->shutdown();
     motor_manager.stopThreads();
     motor_manager.disableAllMotors();
     this->loop_imu->shutdown();
@@ -264,56 +508,11 @@ RL_Real::~RL_Real()
 
 void RL_Real::GetState(RobotState<float> *state)
 {
+    // 跨线程保护:updateJXGLowState 写 JXG_state 期间,遥测线程不得并发读。
+    // 持锁范围覆盖"写+读"全程,保证 state 拿到的是一帧完整一致的快照。
+    std::lock_guard<std::mutex> lk(this->jxg_state_mutex_);
+
     updateJXGLowState(this->JXG_state);
-    const auto& gp = gamepad_state;
-    const bool gamepad_active =
-        gp.A || gp.B || gp.X || gp.Y || gp.LB || gp.RB || gp.L3 || gp.R3 ||
-        gp.back || gp.start || gp.up || gp.down || gp.left || gp.right ||
-        std::abs(gp.left_x) > 0.05f || std::abs(gp.left_y) > 0.05f ||
-        std::abs(gp.right_x) > 0.05f || std::abs(gp.right_y) > 0.05f;
-
-    this->gamepad_override_active = gamepad_active;
-    if (gamepad_active)
-    {
-        if (gp.A)      this->control.SetGamepad(Input::Gamepad::A);
-        if (gp.B)      this->control.SetGamepad(Input::Gamepad::B);
-        if (gp.X)      this->control.SetGamepad(Input::Gamepad::X);
-        if (gp.Y)      this->control.SetGamepad(Input::Gamepad::Y);
-        if (gp.LB)     this->control.SetGamepad(Input::Gamepad::LB);
-        if (gp.RB)     this->control.SetGamepad(Input::Gamepad::RB);
-        if (gp.L3)     this->control.SetGamepad(Input::Gamepad::LStick);
-        if (gp.R3)     this->control.SetGamepad(Input::Gamepad::RStick);
-        if (gp.up)     this->control.SetGamepad(Input::Gamepad::DPadUp);
-        if (gp.down)   this->control.SetGamepad(Input::Gamepad::DPadDown);
-        if (gp.left)   this->control.SetGamepad(Input::Gamepad::DPadLeft);
-        if (gp.right)  this->control.SetGamepad(Input::Gamepad::DPadRight);
-
-        if (gp.LB && gp.A) this->control.SetGamepad(Input::Gamepad::LB_A);
-        if (gp.LB && gp.B) this->control.SetGamepad(Input::Gamepad::LB_B);
-        if (gp.LB && gp.X) this->control.SetGamepad(Input::Gamepad::LB_X);
-        if (gp.LB && gp.Y) this->control.SetGamepad(Input::Gamepad::LB_Y);
-        if (gp.LB && gp.L3) this->control.SetGamepad(Input::Gamepad::LB_LStick);
-        if (gp.LB && gp.R3) this->control.SetGamepad(Input::Gamepad::LB_RStick);
-        if (gp.LB && gp.down) this->control.SetGamepad(Input::Gamepad::LB_DPadDown);
-        if (gp.LB && gp.left) this->control.SetGamepad(Input::Gamepad::LB_DPadLeft);
-        if (gp.LB && gp.right) this->control.SetGamepad(Input::Gamepad::LB_DPadRight);
-        if (gp.RB && gp.A) this->control.SetGamepad(Input::Gamepad::RB_A);
-        if (gp.RB && gp.B) this->control.SetGamepad(Input::Gamepad::RB_B);
-        if (gp.RB && gp.X) this->control.SetGamepad(Input::Gamepad::RB_X);
-        if (gp.RB && gp.Y) this->control.SetGamepad(Input::Gamepad::RB_Y);
-        if (gp.RB && gp.L3) this->control.SetGamepad(Input::Gamepad::RB_LStick);
-        if (gp.RB && gp.R3) this->control.SetGamepad(Input::Gamepad::RB_RStick);
-        if (gp.RB && gp.up) this->control.SetGamepad(Input::Gamepad::RB_DPadUp);
-        if (gp.RB && gp.down) this->control.SetGamepad(Input::Gamepad::RB_DPadDown);
-        if (gp.RB && gp.left) this->control.SetGamepad(Input::Gamepad::RB_DPadLeft);
-        if (gp.RB && gp.right) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
-        if (gp.LB && gp.RB) this->control.SetGamepad(Input::Gamepad::LB_RB);
-
-        this->control.x   = -gp.left_y;
-        this->control.y   = gp.left_x;
-        this->control.yaw = -gp.right_x;
-    }
-
     state->imu.quaternion[0] = this->JXG_state.imu_state.quaternion[0]; // w
     state->imu.quaternion[1] = this->JXG_state.imu_state.quaternion[1]; // x
     state->imu.quaternion[2] = this->JXG_state.imu_state.quaternion[2]; // y
@@ -334,45 +533,105 @@ void RL_Real::GetState(RobotState<float> *state)
     //     debug_offset_printed = true;
     // }
 
-    for (int i = 0; i < cfg_num_dofs_; ++i) {
-        int idx = cfg_joint_mapping_[i];
-        state->motor_state.q[i]       = this->JXG_state.motor_state[idx].q + cfg_lying_down_offset_[i];
+    // 实时环:直接使用构造期缓存的静态参数,零 YAML 解析、零堆分配
+    const int num_dofs = this->cfg_num_dofs;
+    const auto &jm = this->cfg_joint_mapping;
+    const auto &off = this->cfg_lying_offset;
+    for (int i = 0; i < num_dofs; ++i) {
+        const int idx = (i < (int)jm.size()) ? jm[i] : i;
+        const float offset_i = (i < (int)off.size()) ? off[i] : 0.0f;
+        state->motor_state.q[i]       = this->JXG_state.motor_state[idx].q + offset_i;
         state->motor_state.dq[i]      = this->JXG_state.motor_state[idx].dq;
         state->motor_state.tau_est[i] = this->JXG_state.motor_state[idx].tau_est;
     }
 }
 
-void RL_Real::CacheHotParams()
-{
-    cfg_num_dofs_          = params.Get<int>("num_of_dofs");
-    cfg_dt_                = params.Get<float>("dt");
-    cfg_decimation_        = params.Get<int>("decimation");
-    cfg_joint_mapping_     = params.Get<std::vector<int>>("joint_mapping");
-    cfg_lying_down_offset_ = params.Get<std::vector<float>>("lying_down_offset");
-    cfg_observations_history_ = params.Get<std::vector<int>>("observations_history");
-    cfg_clip_actions_upper_   = params.Get<std::vector<float>>("clip_actions_upper");
-    cfg_clip_actions_lower_   = params.Get<std::vector<float>>("clip_actions_lower");
-    cfg_has_clip_ = !cfg_clip_actions_upper_.empty() && !cfg_clip_actions_lower_.empty();
-
-    cmd_tau_.resize(16); cmd_vel_.resize(16); cmd_pos_.resize(16);
-    cmd_kp_.resize(16);  cmd_kd_.resize(16);
-}
-
 void RL_Real::SetCommand(const RobotCommand<float> *command)
 {
-    for (int i = 0; i < cfg_num_dofs_; ++i) {
-        int idx = cfg_joint_mapping_[i];
-        cmd_pos_[idx] = command->motor_command.q[i] - cfg_lying_down_offset_[i];
-        cmd_vel_[idx] = command->motor_command.dq[i];
-        cmd_kp_[idx]  = command->motor_command.kp[i];
-        cmd_kd_[idx]  = command->motor_command.kd[i];
-        cmd_tau_[idx] = command->motor_command.tau[i];
+    // 复用构造期分配的成员缓冲区:零初始化未映射槽(与原每次新建零 vector 语义一致),
+    // 避免 200Hz 下每周期 5 次 vector<float>(16) 堆分配。
+    std::fill(cmd_tau_buf.begin(), cmd_tau_buf.end(), 0.0f);
+    std::fill(cmd_vel_buf.begin(), cmd_vel_buf.end(), 0.0f);
+    std::fill(cmd_pos_buf.begin(), cmd_pos_buf.end(), 0.0f);
+    std::fill(cmd_kp_buf.begin(),  cmd_kp_buf.end(),  0.0f);
+    std::fill(cmd_kd_buf.begin(),  cmd_kd_buf.end(),  0.0f);
+
+    const int num_dofs = this->cfg_num_dofs;
+    const auto &jm = this->cfg_joint_mapping;
+    const auto &off = this->cfg_lying_offset;
+    for (int i = 0; i < num_dofs; ++i) {
+        const int idx = (i < (int)jm.size()) ? jm[i] : i;
+        const float offset_i = (i < (int)off.size()) ? off[i] : 0.0f;
+        cmd_pos_buf[idx] = command->motor_command.q[i] - offset_i;
+        cmd_vel_buf[idx] = command->motor_command.dq[i];
+        cmd_kp_buf[idx]  = command->motor_command.kp[i];
+        cmd_kd_buf[idx]  = command->motor_command.kd[i];
+        cmd_tau_buf[idx] = command->motor_command.tau[i];
     }
-    motor_manager.sendAllMotorsCommand(cmd_tau_, cmd_vel_, cmd_pos_, cmd_kp_, cmd_kd_);
+
+    motor_manager.sendAllMotorsCommand(cmd_tau_buf, cmd_vel_buf, cmd_pos_buf, cmd_kp_buf, cmd_kd_buf);
+}
+
+// 常驻轻量诊断:loop_control 分段 CPU 归因(用户/内核),每秒覆盖写 /tmp/rl_prof.log。
+// 每周期 6 次 getrusage(RUSAGE_THREAD)(vDSO 级,实测 <0.1% 核),用于定位实时环偶发 sys 飙升。
+namespace {
+struct LoopProf {
+    static constexpr int N = 6;
+    long u[N] = {0}, s[N] = {0}, calls[N] = {0};
+    int cyc = 0;
+    static inline std::pair<long,long> rus() {
+        struct rusage r{};
+        ::getrusage(RUSAGE_THREAD, &r);
+        return { r.ru_utime.tv_sec*1000000L + r.ru_utime.tv_usec,
+                 r.ru_stime.tv_sec*1000000L + r.ru_stime.tv_usec };
+    }
+};
+static LoopProf g_lprof;
+struct ProfGuard {
+    int id; long u0, s0;
+    ProfGuard(int i) : id(i) { auto p = LoopProf::rus(); u0 = p.first; s0 = p.second; }
+    ~ProfGuard() {
+        auto p = LoopProf::rus();
+        g_lprof.u[id] += p.first  - u0;
+        g_lprof.s[id] += p.second - s0;
+        ++g_lprof.calls[id];
+    }
+};
 }
 
 void RL_Real::RobotControl()
 {
+    // 常驻轻量诊断:正常 RobotControl ~0.1ms,若某周期超过 4ms 说明卡在某段
+    // (曾观测到 loop_control 偶发 95% sys spin)。把 FSM 状态名 + backtrace 追加写 /tmp/rl_stall.log。
+    // 正常路径仅两次读时钟,不做任何文件/栈操作。
+    struct StallDiag
+    {
+        RL_Real* self;
+        std::chrono::steady_clock::time_point t0;
+        explicit StallDiag(RL_Real* s) : self(s), t0(std::chrono::steady_clock::now()) {}
+        ~StallDiag()
+        {
+            double ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0).count();
+            if (ms < 4.0) return;
+            static std::atomic<int> n{0};
+            int k = n.fetch_add(1);
+            if (k >= 300) return;  // 最多抓 300 次(阈值4ms,避开RL态~3.2ms无害抖动)
+            std::string st = self->fsm.GetCurrentStateName();
+            if (st.empty()) st = "?";
+            int fd = ::open("/tmp/rl_stall.log", O_WRONLY | O_CREAT | O_APPEND, 0666);
+            if (fd < 0) return;
+            char hb[256];
+            int m = snprintf(hb, sizeof(hb), "\n===== STALL %.2fms state=%s =====\n", ms, st.c_str());
+            ::write(fd, hb, m);
+            void* fr[48];
+            int c = backtrace(fr, 48);
+            backtrace_symbols_fd(fr, c, fd);
+            ::close(fd); ::chmod("/tmp/rl_stall.log", 0666);
+        }
+    };
+    StallDiag _stall(this);
+
     this->motiontime++;
 
      if (this->control.current_keyboard == Input::Keyboard::W)
@@ -412,67 +671,57 @@ void RL_Real::RobotControl()
         this->control.yaw = 0;
         this->control.current_keyboard = this->control.last_keyboard;
     }
-    if (this->control.current_keyboard == Input::Keyboard::N || this->control.current_gamepad == Input::Gamepad::X)
-    {
-        this->control.navigation_mode = !this->control.navigation_mode;
-        std::cout << std::endl << LOGGER::INFO << "Navigation mode: " << (this->control.navigation_mode ? "ON" : "OFF") << std::endl;
-        this->control.current_keyboard = this->control.last_keyboard;
-        this->control.current_gamepad = this->control.last_gamepad;
-    }
 
     // updateJXGLowState(this->JXG_state);
-    this->GetState(&this->robot_state);
+    {
+        ProfGuard _pg(0);
+        this->GetState(&this->robot_state);
+    }
 
-    // IMU 连续检查：陀螺仪全零说明IMU无数据，自动切入落下模式
+    // IMU 连续检查：陀螺仪全零说明IMU无数据，连续 100ms 才切入落下模式
+    // 避免瞬时 SPI 读零(单帧抖动)误触发趴下。
+    { ProfGuard _pg(1);
+    static int imu_zero_count = 0;
+    constexpr int kImuZeroLimit = 20;  // 20×5ms=100ms
     if (this->JXG_state.imu_state.gyroscope[0] == 0.0 &&
         this->JXG_state.imu_state.gyroscope[1] == 0.0 &&
         this->JXG_state.imu_state.gyroscope[2] == 0.0)
     {
-        std::string cur_state = this->fsm.current_state_->GetStateName();
-        if (cur_state != "RLFSMStatePassive")
+        if (++imu_zero_count == kImuZeroLimit)  // 仅达标时触发一次
         {
-            static int imu_warn_cnt = 0;
-            if (++imu_warn_cnt % 100 == 1)  // ~0.2s打印一次，避免刷屏
-            {
-                std::cout << LOGGER::WARNING << "IMU data lost! Forcing GetDown..." << std::endl;
-                this->Notify("warning", "IMU data lost! Forcing GetDown...");
-            }
-            this->fsm.RequestStateChange("RLFSMStateGetDown");
-        }
-    }
-
-    // 手柄断连检查：
-    static bool gamepad_was_connected = xbox_gamepad && xbox_gamepad->connected;
-    if (xbox_gamepad)
-    {
-        if (xbox_gamepad->connected)
-            gamepad_was_connected = true;
-        else if (gamepad_was_connected)
-        {
-            std::string cur_state = this->fsm.current_state_->GetStateName();
+            std::string cur_state = this->fsm.GetCurrentStateName();
             if (cur_state != "RLFSMStatePassive")
             {
-                static int gamepad_warn_cnt = 0;
-                if (++gamepad_warn_cnt % 100 == 1)
-                {
-                    std::cout << LOGGER::WARNING << "Gamepad disconnected! Forcing GetDown..." << std::endl;
-                    this->Notify("warning", "Gamepad disconnected! Forcing GetDown...");
-                }
+                // write(2) 替代 std::cout:避免 iostream 锁开销;异常路径用 fprintf 即可
+                fprintf(stderr, "[WARN] IMU data lost (gyro all-zero for 100ms)! Forcing GetDown...\n");
+                this->Notify("warning", "IMU data lost! Forcing GetDown...");
                 this->fsm.RequestStateChange("RLFSMStateGetDown");
             }
         }
+    }
+    else
+    {
+        imu_zero_count = 0;  // 恢复正常:清零计数
     }
 
     // 电机反馈连续检查：
     if (this->rl_init_done)
     {
+        // 防御:确保每电机计数器容量(历史上 {16,0} 花括号误初始化成 2 元素导致越界 abort)
+        if ((int)motor_dead_count.size() != 16)
+        {
+            std::cout << LOGGER::WARNING << "motor_dead_count size=" << motor_dead_count.size()
+                      << " != 16, auto-resizing" << std::endl;
+            motor_dead_count.assign(16, 0);
+        }
         constexpr float dead_eps = 0.01f;
-        constexpr int dead_cycles_limit = 10;  // 10×5ms=50ms，约1次RL推理窗口
-        static const std::vector<int> wheel_indices = {3, 7, 11, 15};
+        constexpr int dead_cycles_limit = 20;  // 20×5ms=100ms，约2次RL推理窗口
+        // 轮电机索引位掩码(3/7/11/15),替代 std::find 线性搜索:200Hz 下省 12×4 次比较/周期
+        static const uint16_t wheel_mask = (1u << 3) | (1u << 7) | (1u << 11) | (1u << 15);
 
         for (int i = 0; i < 16; ++i)
         {
-            if (std::find(wheel_indices.begin(), wheel_indices.end(), i) != wheel_indices.end())
+            if (wheel_mask & (1u << i))
                 continue;
 
             float dq  = this->JXG_state.motor_state[i].dq;
@@ -483,11 +732,13 @@ void RL_Real::RobotControl()
                 motor_dead_count[i]++;
                 if (motor_dead_count[i] == dead_cycles_limit)  // 仅触发时打印一次
                 {
-                    std::string cur_state = this->fsm.current_state_->GetStateName();
-                    if (cur_state != "RLFSMStatePassive" && cur_state != "RLFSMStateGetDown")
+                    std::string cur_state = this->fsm.GetCurrentStateName();
+                    // SafeHold 下机器人可能被外力完全承托(架起/人扶),vel&tau 长期≈0 是正常的
+                    if (cur_state != "RLFSMStatePassive" && cur_state != "RLFSMStateGetDown"
+                        && cur_state != "RLFSMStateSafeHold")
                     {
-                        std::cout << LOGGER::WARNING << "Motor[" << i << "] feedback abnormal (vel&tau≈0 for 50ms)! Forcing GetDown..." << std::endl;
-                        this->Notify("warning", "Motor[" + std::to_string(i) + "] feedback abnormal (vel&tau≈0 for 50ms)! Forcing GetDown...");
+                        fprintf(stderr, "[WARN] Motor[%d] feedback abnormal (vel&tau≈0 for 100ms)! Forcing GetDown...\n", i);
+                        this->Notify("warning", "Motor[" + std::to_string(i) + "] feedback abnormal (vel&tau≈0 for 100ms)! Forcing GetDown...");
                         this->fsm.RequestStateChange("RLFSMStateGetDown");
                     }
                 }
@@ -499,18 +750,191 @@ void RL_Real::RobotControl()
         }
     }
 
-    // 检测手柄 LB+RB 组合键退出
-    if (this->control.current_gamepad == Input::Gamepad::LB_RB) {
-        std::cout << "\nGamepad LB+RB pressed. Exiting program..." << std::endl;
-        g_shutdown_flag.store(true);
-        return;
+    } // end S1(安全检查)
+
+    // ── SafetyHold: 任一电机 CAN 反馈超时(>100ms)时,冻结所有电机为当前位置 ──
+    // ── P1 倾覆保护 + IMU 看门狗 + NaN 告警消费(仅 RL 态判定,并入 SafeHold 拦截) ──
+    // 倾覆(P1-A):|roll|>0.9rad 或 |pitch|>0.8rad 连续 2 帧(10ms@200Hz)确认,防瞬时
+    //   误判;GetUp/GetDown 过程姿态本就大,只在 RLLocomotion 态检查,SafeHold 驻留的
+    //   任何姿态(含已倾覆)都不再切换,避免震荡。
+    // IMU(P1-B):数据凝固检测——quat4+gyro3+acc3 共 10 个 double 与上次采样完全相等
+    //   即未更新,凝固 >200ms 判为断供(DM-IMU double 噪声下静止也持续微变,正常不会
+    //   误判;含从未上电的默认恒值情形);另拦四元数 NaN 与模长平方偏离 1 超 ±10%。
+    // NaN(P1-B):推理线程连续 3 帧坏帧置 nan_alert_,此处 exchange 消费并复位。
+    // 触发后与 CAN 断线/手动阻断同构:RL 态当帧切 SafeHold,无一帧策略输出,需人工重进。
+    const std::string pre_hold_state = this->fsm.GetCurrentStateName();
+    bool tilt_trigger = false, imu_trigger = false, nan_trigger = false;
+    if (pre_hold_state == "RLFSMStateRLLocomotion" || pre_hold_state == "RLFSMStateDiffDrive")
+    {
+        const auto now_guard = std::chrono::steady_clock::now();
+        const auto* q = this->JXG_state.imu_state.quaternion;
+        const auto* g = this->JXG_state.imu_state.gyroscope;
+        const auto* ac = this->JXG_state.imu_state.accelerometer;
+
+        // P1-A 倾覆(ZYX 欧拉,rad)
+        const double roll = std::atan2(2.0 * (q[0] * q[1] + q[2] * q[3]),
+                                       1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]));
+        double sinp = 2.0 * (q[0] * q[2] - q[3] * q[1]);
+        if (sinp > 1.0) sinp = 1.0; else if (sinp < -1.0) sinp = -1.0;
+        const double pitch = std::asin(sinp);
+        static int tilt_streak = 0;
+        if (std::fabs(roll) > 0.9 || std::fabs(pitch) > 0.8) { ++tilt_streak; }
+        else { tilt_streak = 0; }
+        tilt_trigger = (tilt_streak >= 2);
+
+        // P1-B IMU 凝固 / NaN / 模长(qn2 为 NaN 时两比较恒 false,由 quat_nan 单独拦)
+        static double last_sig[10] = {0};
+        static auto last_imu_change = now_guard;
+        const double sig[10] = {q[0], q[1], q[2], q[3], g[0], g[1], g[2], ac[0], ac[1], ac[2]};
+        bool same = true;
+        for (int k = 0; k < 10; ++k) { if (sig[k] != last_sig[k]) { same = false; break; } }
+        if (!same)
+        {
+            for (int k = 0; k < 10; ++k) last_sig[k] = sig[k];
+            last_imu_change = now_guard;
+        }
+        bool quat_nan = false;
+        for (int k = 0; k < 4; ++k) { if (!std::isfinite(q[k])) { quat_nan = true; break; } }
+        const double qn2 = q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3];
+        imu_trigger = (now_guard - last_imu_change > std::chrono::milliseconds(200)) ||
+                      quat_nan || (qn2 < 0.81 || qn2 > 1.21);
+
+        // P1-B 推理输出 NaN 连续坏帧告警消费
+        if (pre_hold_state == "RLFSMStateRLLocomotion")
+            nan_trigger = this->nan_alert_.exchange(false, std::memory_order_acq_rel);
     }
 
-    this->StateController(&this->robot_state, &this->robot_command);
-    this->control.ClearInput();
-    this->SetCommand(&this->robot_command);
+    // v7.2 关键安全机制(对齐 v7.1):CAN 断线时驱动器保持执行最后一帧指令,而软件
+    // 仍使用冻结反馈——若继续放行 RL 策略,会基于错配观测输出导致姿态突变。
+    const bool can_safety = this->SafetyHoldActive();
+    // 手动"阻断强化学习"急停:与 CAN 保护走同一套当帧 SafeHold 逻辑。
+    const bool manual_block = this->manual_rl_block_.load(std::memory_order_relaxed);
+    // BMS 低电量持续报警:每帧检查,SOC/电压超阈值时每 10s 推送一次 notify。
+    // 仅报警不强制 SafeHold(留给人工决策;如需强制停机可在此扩展)。
+    this->CheckLowBattery();
+    this->CheckMotorTempAlert();
+    const bool safety_hold_active = can_safety || manual_block || tilt_trigger || imu_trigger || nan_trigger;
+    // 每帧(200Hz)刷新 CAN 健康标志并供 posture 广播:必须放在拦截 return 之前,
+    // 否则断线后非 RL 分支 return 跳过遥测段,can_ready 会冻结在断线前的 true,
+    // 前端永远显示"CAN 正常"(v7.1 同类缺陷)。100ms 阈值,正常 age<3ms 不会误闪。
+    // 注意:CAN 胶囊只反映真实 CAN 状态,手动阻断不应让前端误报 CAN 故障。
+    this->can_feedback_live_.store(!can_safety, std::memory_order_relaxed);
+    if (safety_hold_active)
+    {
+        const std::string cur_hold_state = this->fsm.GetCurrentStateName();
+        const bool in_rl = (cur_hold_state == "RLFSMStateRLLocomotion" ||
+                            cur_hold_state == "RLFSMStateDiffDrive");
 
-    const double dt = static_cast<double>(cfg_dt_);
+        // 限频告警(每 2s 一次,避免日志刷屏;首次触发立即报)
+        static auto last_safety_warn = std::chrono::steady_clock::time_point{};
+        const auto now_warn = std::chrono::steady_clock::now();
+        if (now_warn - last_safety_warn >= std::chrono::seconds(2))
+        {
+            last_safety_warn = now_warn;
+            if (tilt_trigger)
+            {
+                fprintf(stderr, "[SAFETY] TILT GUARD: roll/pitch over limit in RL -> SafeHold NOW\n");
+                this->Notify("error", "倾覆保护:姿态超限,已立即退出强化学习并原地保持(SafeHold),恢复后需人工重新进入");
+            }
+            else if (imu_trigger)
+            {
+                fprintf(stderr, "[SAFETY] IMU WATCHDOG: data stale/invalid in RL -> SafeHold NOW\n");
+                this->Notify("error", "IMU 数据断供或异常,已立即退出强化学习并原地保持(SafeHold),恢复后需人工重新进入");
+            }
+            else if (nan_trigger)
+            {
+                fprintf(stderr, "[SAFETY] RL ACTION NaN streak -> SafeHold NOW\n");
+                this->Notify("error", "策略输出连续异常(NaN),已立即退出强化学习并原地保持(SafeHold),恢复后需人工重新进入");
+            }
+            else if (manual_block)
+            {
+                // 手动阻断只在命令入口弹一次 toast(rl_block 处理处已 Notify
+                // "强化学习输出已阻断")。此处若重复 Notify,阻断状态需人工 getup
+                // 才解除,期间前端每 2s 弹一次"手动阻断已触发"弹窗,纯骚扰——
+                // 降级为只写 journald 日志;持续状态由姿态胶囊(SafeHold)可见。
+                fprintf(stderr, "[SAFETY] MANUAL RL BLOCK: force exit -> SafeHold NOW\n");
+            }
+            else if (in_rl)
+            {
+                fprintf(stderr, "[SAFETY] CAN feedback stale in RL: exit locomotion -> SafeHold NOW\n");
+                this->Notify("error", "CAN 反馈超时，已立即退出强化学习并原地保持(SafeHold)，恢复后需人工重新进入");
+            }
+            else
+            {
+                fprintf(stderr, "[SAFETY] CAN feedback stale, holding current position (SafetyHold)\n");
+            }
+        }
+
+        // 标记进行中的 Web 行为命令为 FAILED(原因: safety hold active)
+        {
+            std::lock_guard<std::mutex> lk(this->pending_cmd_mutex_);
+            if (this->pending_cmd_)
+            {
+                this->EmitCommandState(this->pending_cmd_->seq, this->pending_cmd_->cmd,
+                                       kFailed, this->pending_cmd_->target_state, 0);
+                this->pending_cmd_.reset();
+            }
+        }
+
+        if (in_rl)
+        {
+            // RL 态:断线当帧立即退出,不等反馈恢复。
+            // RequestStateChange 置 CHANGE 标志后不 return,放行到 StateController:
+            // fsm.Run() 走 CHANGE 分支——RLLocomotion.Exit()(清 rl_init_done,loop_rl
+            // 推理线程下一帧起跳过 Forward/ComputeOutput/PublishAction,不产出任何动作)
+            // → SafeHold.Enter()(抓取当前关节角) → SafeHold.Run()
+            // (写 q=当前位/dq=0/fixed PD 保持帧)。本帧 SetCommand 发出的就是 SafeHold
+            // 保持帧,全程无一帧 RL 策略输出。反馈恢复后停留在 SafeHold,需人工重进 RL。
+            this->fsm.RequestStateChange("RLFSMStateSafeHold");
+            // fall through:继续走下方 StateController/SetCommand 完成当帧切换
+        }
+        else
+        {
+            // 非 RL 态(Passive/GetUp/GetDown/SafeHold):维持拦截——
+            // 发当前位 PD 保持帧,跳过 StateController,直到反馈恢复。
+            // 覆盖指令: q=当前实际位置, dq=0, kp/kd=fixed, tau=0
+            auto all_pos = motor_manager.getAllMotorPos();  // Eigen::VectorXf(16)
+            auto fkp = this->params.Get<std::vector<float>>("fixed_kp");
+            auto fkd = this->params.Get<std::vector<float>>("fixed_kd");
+            if (fkp.size() != 16) fkp.assign(16, 0.0f);
+            if (fkd.size() != 16) fkd.assign(16, 1.0f);
+
+            // 零分配静态缓冲区(200Hz 热路径禁止堆分配)
+            static std::vector<float> tau_z(16, 0.0f), vel_z(16, 0.0f);
+            static std::vector<float> pos_buf(16);
+            for (int i = 0; i < 16; ++i) pos_buf[i] = all_pos[i];
+
+            motor_manager.sendAllMotorsCommand(tau_z, vel_z, pos_buf, fkp, fkd);
+
+#if defined(USE_ROS2_REAL_CONTROL) || JXG_WEB_LAYER
+            // 拦截期间对外广播不能停摆:posture 停发会使前端冻结在断线前画面;
+            // 更关键的是 motor_state/imu_state 也必须照常——只断一路 CAN 时,
+            // 其余 3 路 12 台电机与 IMU 仍在实时刷新,整页冻结会误导用户以为全死。
+            // 断线 4 台冻结在最后真实值,feedback_age_ms 字段透传其数据年龄供看板标红。
+            static int sh_telemetry_cnt = 0;
+            if (++sh_telemetry_cnt >= 25) {
+                sh_telemetry_cnt = 0;
+                this->PublishTelemetryBundle();
+            }
+#endif
+            return;  // 跳过 StateController/SetCommand/HR log(遥测已在上方补发)
+        }
+    }
+
+    {
+        ProfGuard _pg(2);
+        this->StateController(&this->robot_state, &this->robot_command);
+        this->control.ClearInput();
+        this->UpdatePendingCommand();  // Web 行为命令生命周期: 到位发 DONE / 超时发 FAILED
+    }
+    {
+        ProfGuard _pg(3);
+        this->SetCommand(&this->robot_command);
+    }
+
+#if defined(USE_ROS2_REAL_CONTROL) || JXG_WEB_LAYER
+    { ProfGuard _pg(4);
+    const double dt = static_cast<double>(this->params.Get<float>("dt"));
     this->odometry_yaw += static_cast<double>(this->control.yaw) * dt;
     const double cos_yaw = std::cos(this->odometry_yaw);
     const double sin_yaw = std::sin(this->odometry_yaw);
@@ -519,57 +943,51 @@ void RL_Real::RobotControl()
     this->velocity_z = 0.0;
     this->odometry_x += this->velocity_x * dt;
     this->odometry_y += this->velocity_y * dt;
-    // Web telemetry: publish motor and IMU state at ~8Hz (200Hz/25).
-    static int web_telemetry_cnt = 0;
-    if (++web_telemetry_cnt >= 25) {
-        web_telemetry_cnt = 0;
-        auto all_pos = motor_manager.getAllMotorPos();
-        auto all_vel = motor_manager.getAllMotorVel();
-        auto all_tau = motor_manager.getAllMotorTorque();
-        auto all_temp = motor_manager.getAllMotorTemp();
-
-        this->PublishMotorState(cfg_num_dofs_, cfg_joint_mapping_, cfg_lying_down_offset_,
-                                all_pos, all_vel, all_tau, all_temp);
-        this->PublishImuState();
-        this->PublishPose2D();
-        this->ProcessNotifyRetries(SteadyNowSec());
+    // Telemetry: publish motor and IMU state at ~8Hz when the control loop is 200Hz.
+    // (ROS 模式走话题,裸机模式经 web_bridge WebSocket 推送)
+    // 与 SafetyHold 拦截分支共用 PublishTelemetryBundle,保证断线拦截期间
+    // 其余在线电机/IMU 数据不冻结。
+    static int ros_telemetry_cnt = 0;
+    if (++ros_telemetry_cnt >= 25) {
+        ros_telemetry_cnt = 0;
+        // 注: can_feedback_live_ 已移至 SafetyHold 拦截前每帧刷新(100ms),
+        // 保证断线拦截期间前端仍能收到 can_ready=false。
+        this->PublishTelemetryBundle();
     }
-
-    // DEBUG: 每 100 次控制循环打印一次电机参数（~0.5s @ 200Hz）
-    static int debug_cnt = 0;
-    if (++debug_cnt >= 100) {
-        debug_cnt = 0;
-        auto all_pos = motor_manager.getAllMotorPos();
-        auto all_vel = motor_manager.getAllMotorVel();
-        auto all_tau = motor_manager.getAllMotorTorque();
-        auto all_temp = motor_manager.getAllMotorTemp();
-
-        std::cout << std::fixed << std::setprecision(3);
-        std::cout << "\n[MOTOR] idx | target_pos  real_pos  | target_vel  real_vel  | target_tau  real_tau | kp     kd    temp" << std::endl;
-        for (int i = 0; i < cfg_num_dofs_; ++i) {
-            int idx = cfg_joint_mapping_[i];
-            float tgt_pos = this->robot_command.motor_command.q[i];
-            float tgt_vel = this->robot_command.motor_command.dq[i];
-            float tgt_tau = this->robot_command.motor_command.tau[i];
-            float kp = this->robot_command.motor_command.kp[i];
-            float kd = this->robot_command.motor_command.kd[i];
-            float real_pos = all_pos[idx] + cfg_lying_down_offset_[i];
-            float real_vel = all_vel[idx];
-            float real_tau = all_tau[idx];
-            float real_temp = (idx < (int)all_temp.size()) ? all_temp[idx] : 0.0f;
-            std::cout << "       " << std::setw(2) << idx
-                      << " | " << std::setw(10) << tgt_pos << " " << std::setw(9) << real_pos
-                      << " | " << std::setw(10) << tgt_vel << " " << std::setw(9) << real_vel
-                      << " | " << std::setw(10) << tgt_tau << " " << std::setw(9) << real_tau
-                      << " | " << std::setw(6) << kp << " " << std::setw(6) << kd
-                      << " " << std::setw(6) << std::setprecision(1) << real_temp << "C" << std::setprecision(3)
-                      << std::endl;
-        }
-    }
+    } // end S4(遥测)
+#endif
 
 #ifdef ENABLE_HR_LOGGER
+    { ProfGuard _pg(5);
     this->HrLogPush();
+    }
 #endif
+
+    // 常驻诊断:每秒(200周期)覆盖写一次分段归因
+    if (++g_lprof.cyc >= 200) {
+        g_lprof.cyc = 0;
+        std::string st = this->fsm.GetCurrentStateName();
+        if (st.empty()) st = "?";
+        char b[1024];
+        int n = snprintf(b, sizeof(b),
+            "state=%s\n"
+            "S0_GetState      usr=%7ldus sys=%7ldus calls=%ld\n"
+            "S1_safety_checks usr=%7ldus sys=%7ldus calls=%ld\n"
+            "S2_StateCtrl/FSM usr=%7ldus sys=%7ldus calls=%ld\n"
+            "S3_SetCommand    usr=%7ldus sys=%7ldus calls=%ld\n"
+            "S4_telemetry     usr=%7ldus sys=%7ldus calls=%ld\n"
+            "S5_HrLog         usr=%7ldus sys=%7ldus calls=%ld\n",
+            st.c_str(),
+            g_lprof.u[0],g_lprof.s[0],g_lprof.calls[0],
+            g_lprof.u[1],g_lprof.s[1],g_lprof.calls[1],
+            g_lprof.u[2],g_lprof.s[2],g_lprof.calls[2],
+            g_lprof.u[3],g_lprof.s[3],g_lprof.calls[3],
+            g_lprof.u[4],g_lprof.s[4],g_lprof.calls[4],
+            g_lprof.u[5],g_lprof.s[5],g_lprof.calls[5]);
+        int fd = ::open("/tmp/rl_prof.log", O_WRONLY|O_CREAT|O_TRUNC, 0666);
+        if (fd >= 0) { ::write(fd, b, n); ::close(fd); ::chmod("/tmp/rl_prof.log",0666); }
+        for (int i = 0; i < LoopProf::N; ++i) { g_lprof.u[i]=0; g_lprof.s[i]=0; g_lprof.calls[i]=0; }
+    }
 }
 
 
@@ -581,21 +999,46 @@ void RL_Real::RunModel()
         this->obs.ang_vel = this->robot_state.imu.gyroscope;
         if (this->control.navigation_mode)
         {
-            // 命令超时保护：上位机(Web 调试台)断开后，若超过阈值未收到新 cmd_vel，
+#if JXG_WEB_LAYER
+            // v4: Web 层开启(含与 ROS 共存)时的统一速度路径。
+            // ROS /rl_real/cmd_vel 回调与 Web cmd_vel 回调都会写 control.x/y/yaw,
+            // 故此处只认 control,超时归零也只执行一份,避免共存时双重超时/源覆盖。
+            // 命令超时保护：上位机断开后，若超过阈值未收到新 cmd_vel，
             // 立即归零速度，避免机器狗保持最后一条指令持续前冲。
-            const double dt_cmd = std::chrono::duration<double>(
+            const double dt_cmd_web = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - this->last_cmd_vel_time_).count();
-            if (dt_cmd > kCmdVelTimeoutSec)
+            if (dt_cmd_web > kCmdVelTimeoutSec)
             {
-                if (this->cmd_vel.x != 0.0 || this->cmd_vel.y != 0.0 || this->cmd_vel.yaw != 0.0)
+                if (this->control.x != 0.0f || this->control.y != 0.0f || this->control.yaw != 0.0f)
                 {
-                    this->cmd_vel = CmdVel();
+                    this->control.x = 0.0f;
+                    this->control.y = 0.0f;
+                    this->control.yaw = 0.0f;
                     std::cout << LOGGER::WARNING << "cmd_vel timeout (" << kCmdVelTimeoutSec
                               << "s), velocity zeroed" << std::endl;
                     PublishRosFeedback("cmd_vel timeout: velocity zeroed");
                 }
             }
-            this->obs.commands = {(float)this->cmd_vel.x, (float)this->cmd_vel.y, (float)this->cmd_vel.yaw};
+            this->obs.commands = {this->control.x, this->control.y, this->control.yaw};
+#elif defined(USE_ROS2_REAL_CONTROL) || (!defined(USE_CMAKE) && defined(USE_ROS))
+            // 纯 ROS 构建(无 Web 层): 命令超时保护。上位机(rosbridge)断开后，
+            // 若超过阈值未收到新 cmd_vel，立即归零速度，避免保持最后速度指令持续前冲。
+            const double dt_cmd = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - this->last_cmd_vel_time_).count();
+            if (dt_cmd > kCmdVelTimeoutSec)
+            {
+                if (this->cmd_vel.linear.x != 0.0f || this->cmd_vel.linear.y != 0.0f || this->cmd_vel.angular.z != 0.0f)
+                {
+                    this->cmd_vel = geometry_msgs::msg::Twist();
+                    std::cout << LOGGER::WARNING << "cmd_vel timeout (" << kCmdVelTimeoutSec
+                              << "s), velocity zeroed" << std::endl;
+                    PublishRosFeedback("cmd_vel timeout: velocity zeroed");
+                }
+            }
+            this->obs.commands = {(float)this->cmd_vel.linear.x, (float)this->cmd_vel.linear.y, (float)this->cmd_vel.angular.z};
+#else
+            this->obs.commands = {this->control.x, this->control.y, this->control.yaw};
+#endif
         }
         else
         {
@@ -608,18 +1051,59 @@ void RL_Real::RunModel()
         this->obs.actions = this->Forward();
         this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
 
-        if (!this->output_dof_pos.empty())
+        // 热修改 2(2026-10-02): 轮速目标一阶低通滤波,抑制策略输出的高频轮速抖动。
+        // 只滤轮子(wheel_indices, wheel 模式 JXGw 下为 {3,7,11,15};非 wheel 模式为空,自然跳过)。
+        // 首次运行/向量尺寸变化/推理中断超过 0.1s(策略退出后重入)时,状态作废并首拍直跟踪,
+        // 不用陈旧值做插值,避免起步瞬间轮速突变。
+        //
+        // 热修改 3(2026-10-11): cmd=0 门限——三轴指令全部低于死区(输入端
+        // ApplyDeadzone 已归零,此处按 kCmdVelDeadzone 复核,兜住绕过输入死区的
+        // 指令链路)时,把策略输出的轮速目标强制清零,防止模型在零指令下仍输出
+        // 爬行轮速。清零在低通之前(raw=0),轮速经 LPF 平滑收敛到 0,无阶跃。
         {
-            output_dof_pos_queue.push(this->output_dof_pos);
+            const std::vector<int> &wheel_idx = this->params.Get<std::vector<int>>("wheel_indices");
+            const auto now_t = std::chrono::steady_clock::now();
+            bool reinit = (wheel_vel_lpf_.size() != output_dof_vel.size());
+            if (!reinit && wheel_vel_lpf_.size() == output_dof_vel.size() &&
+                !wheel_idx.empty())
+            {
+                const double gap = std::chrono::duration<double>(now_t - last_runmodel_time_).count();
+                if (gap > kWheelLpfResetGapSec) reinit = true;
+            }
+            bool cmd_all_zero = false;
+            if (!wheel_idx.empty())
+            {
+                const std::vector<float> &c = this->obs.commands;
+                cmd_all_zero = c.size() >= 3 &&
+                               std::abs(c[0]) < kCmdVelDeadzone &&
+                               std::abs(c[1]) < kCmdVelDeadzone &&
+                               std::abs(c[2]) < kCmdVelDeadzone;
+            }
+            if (reinit)
+            {
+                wheel_vel_lpf_ = output_dof_vel;  // 首拍直接跟踪原始目标
+                if (cmd_all_zero)
+                {
+                    for (int i : wheel_idx)
+                        if (i >= 0 && (size_t)i < wheel_vel_lpf_.size()) wheel_vel_lpf_[i] = 0.0f;
+                }
+            }
+            else
+            {
+                for (int i : wheel_idx)
+                {
+                    if (i < 0 || (size_t)i >= output_dof_vel.size()) continue;
+                    const float raw = cmd_all_zero ? 0.0f : output_dof_vel[i];
+                    wheel_vel_lpf_[i] = kWheelVelLpfAlpha * raw +
+                                        (1.0f - kWheelVelLpfAlpha) * wheel_vel_lpf_[i];
+                    output_dof_vel[i] = wheel_vel_lpf_[i];
+                }
+            }
+            last_runmodel_time_ = now_t;
         }
-        if (!this->output_dof_vel.empty())
-        {
-            output_dof_vel_queue.push(this->output_dof_vel);
-        }
-        if (!this->output_dof_tau.empty())
-        {
-            output_dof_tau_queue.push(this->output_dof_tau);
-        }
+
+        // 发布最新一帧动作到无锁三缓冲(替代原 3 个 TBB 无界队列 push)。
+        this->PublishAction();
 
         // this->TorqueProtect(this->output_dof_tau);
         // this->AttitudeProtect(this->robot_state.imu.quaternion, 75.0f, 75.0f);
@@ -669,98 +1153,7 @@ void RL_Real::RunModel()
 }
 
 
-#ifdef ENABLE_HR_LOGGER
-// ===== 高频(200Hz)记录器实现 =====
-// 在 loop_control(200Hz) 末尾调用; 同步写入 1MB 用户缓冲, 每 ~10s flush 一次。
-void RL_Real::HrLogInit()
-{
-    auto now = std::chrono::system_clock::now();
-    std::time_t tt = std::chrono::system_clock::to_time_t(now);
-    std::tm tmv = *std::localtime(&tt);
-    char ts[32];
-    std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tmv);
-
-    char path[256];
-    std::snprintf(path, sizeof(path), "logs/%s_hr_%s.csv", this->robot_name.c_str(), ts);
-
-    static std::vector<char> hr_buf(1 << 20);  // 1MB 用户缓冲
-    this->hr_file.rdbuf()->pubsetbuf(hr_buf.data(), static_cast<std::streamsize>(hr_buf.size()));
-    this->hr_file.open(path, std::ios::out | std::ios::trunc);
-    if (!this->hr_file.is_open())
-    {
-        std::cerr << LOGGER::WARNING << "HR logger: 无法打开 " << path << std::endl;
-        return;
-    }
-
-    this->hr_num_dofs = this->params.Get<int>("num_of_dofs");
-    this->hr_jm = this->params.Get<std::vector<int>>("joint_mapping");
-    this->hr_offset = this->params.Get<std::vector<float>>("lying_down_offset");
-
-    this->hr_file << "t,gyro_x,gyro_y,gyro_z,acc_x,acc_y,acc_z,"
-                     "quat_w,quat_x,quat_y,quat_z,cmd_x,cmd_y,cmd_z";
-    for (int i = 0; i < this->hr_num_dofs; ++i)
-        this->hr_file << ",m" << i << "_tgt_pos,m" << i << "_real_pos,m" << i
-                      << "_tgt_vel,m" << i << "_real_vel,m" << i << "_real_tau,m" << i << "_temp";
-    this->hr_file << "\n";
-    this->hr_file.flush();
-
-    this->hr_t0 = std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-    this->hr_rows = 0;
-    std::cout << LOGGER::INFO << "HR logger (200Hz) 已启动: " << path << std::endl;
-}
-
-void RL_Real::HrLogPush()
-{
-    if (!this->hr_file.is_open() || this->hr_num_dofs <= 0) return;
-    if (!this->rl_init_done) return;   // 仅在策略加载后记录
-
-    const auto &imu = this->robot_state.imu;
-    if (imu.gyroscope.size() < 3 || imu.accelerometer.size() < 3 || imu.quaternion.size() < 4)
-        return;
-    auto fb = motor_manager.getAllMotorFeedback();  // 一次加锁, 同帧一致
-    const auto &mc = this->robot_command.motor_command;
-
-    double now = std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-
-    this->hr_file << std::fixed << std::setprecision(5)
-                  << (now - this->hr_t0) << ','
-                  << imu.gyroscope[0] << ',' << imu.gyroscope[1] << ',' << imu.gyroscope[2] << ','
-                  << imu.accelerometer[0] << ',' << imu.accelerometer[1] << ',' << imu.accelerometer[2] << ','
-                  << imu.quaternion[0] << ',' << imu.quaternion[1] << ','
-                  << imu.quaternion[2] << ',' << imu.quaternion[3] << ','
-                  << this->control.x << ',' << this->control.y << ',' << this->control.yaw;
-
-    for (int i = 0; i < this->hr_num_dofs; ++i)
-    {
-        if ((size_t)i >= mc.q.size() || (size_t)i >= mc.dq.size()) break;
-        int idx = (i < (int)this->hr_jm.size()) ? this->hr_jm[i] : i;
-        float off = (i < (int)this->hr_offset.size()) ? this->hr_offset[i] : 0.0f;
-        float rp = (fb.pos.size() > idx) ? (fb.pos[idx] + off) : 0.0f;
-        float rv = (fb.vel.size() > idx) ? fb.vel[idx] : 0.0f;
-        float rt = (fb.tau.size() > idx) ? fb.tau[idx] : 0.0f;
-        float tp = (fb.temp.size() > (size_t)idx) ? fb.temp[idx] : 0.0f;
-        this->hr_file << ',' << mc.q[i] << ',' << rp
-                      << ',' << mc.dq[i] << ',' << rv
-                      << ',' << rt << ',' << tp;
-    }
-    this->hr_file << '\n';
-
-    if (++this->hr_rows % 2000 == 0)
-        this->hr_file.flush();   // ~10s 落盘一次
-}
-
-void RL_Real::HrLogClose()
-{
-    if (this->hr_file.is_open())
-    {
-        this->hr_file.flush();
-        this->hr_file.close();
-        std::cout << LOGGER::INFO << "HR logger 已关闭, 共 " << this->hr_rows << " 行" << std::endl;
-    }
-}
-#endif
+// C3-fix: HR 日志模块已拆分至 rl_real_hr_log.cpp
 
 
 std::vector<float> RL_Real::Forward()
@@ -775,18 +1168,11 @@ std::vector<float> RL_Real::Forward()
 
     std::vector<float> clamped_obs = this->ComputeObservation();
 
-    // policy yaml 在模型加载阶段读入,首次推理时把相关键补进缓存
-    if (!cfg_policy_cached_)
-    {
-        CacheHotParams();
-        cfg_policy_cached_ = true;
-    }
-
     std::vector<float> actions;
-    if (!cfg_observations_history_.empty())
+    if (!this->params.Get<std::vector<int>>("observations_history").empty())
     {
         this->history_obs_buf.insert(clamped_obs);
-        this->history_obs = this->history_obs_buf.get_obs_vec(cfg_observations_history_);
+        this->history_obs = this->history_obs_buf.get_obs_vec(this->params.Get<std::vector<int>>("observations_history"));
         actions = this->model->forward({this->history_obs});
     }
     else
@@ -794,9 +1180,41 @@ std::vector<float> RL_Real::Forward()
         actions = this->model->forward({clamped_obs});
     }
 
-    if (cfg_has_clip_)
+    // P1-B 输出 NaN 拦截:clamp 对 NaN 无效(比较恒 false), 坏帧直接进 PD 会产生
+    // NaN 力矩目标。单帧坏帧 → 用上帧有效动作替换(首帧无历史则归零=default 姿态);
+    // 连续 3 帧 → 置 nan_alert_, 由控制环并入 SafeHold 拦截组合强制退出 RL。
+    // last_valid_actions_/计数仅本推理线程访问, 无竞争。
     {
-        return clamp(actions, cfg_clip_actions_lower_, cfg_clip_actions_upper_);
+        bool has_nan = false;
+        for (float v : actions) { if (!std::isfinite(v)) { has_nan = true; break; } }
+        if (has_nan)
+        {
+            const int streak = this->nan_bad_streak_.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (this->last_valid_actions_.size() == actions.size())
+            {
+                actions = this->last_valid_actions_;
+            }
+            else
+            {
+                actions.assign(actions.size(), 0.0f);
+            }
+            if (streak >= 3)
+            {
+                this->nan_alert_.store(true, std::memory_order_release);
+                std::cout << LOGGER::ERROR << "RL action NaN streak=" << streak
+                          << ", request SafeHold via control loop" << std::endl;
+            }
+        }
+        else
+        {
+            this->nan_bad_streak_.store(0, std::memory_order_relaxed);
+            this->last_valid_actions_ = actions;
+        }
+    }
+
+    if (!this->params.Get<std::vector<float>>("clip_actions_upper").empty() && !this->params.Get<std::vector<float>>("clip_actions_lower").empty())
+    {
+        return clamp(actions, this->params.Get<std::vector<float>>("clip_actions_lower"), this->params.Get<std::vector<float>>("clip_actions_upper"));
     }
     else
     {
@@ -807,417 +1225,32 @@ std::vector<float> RL_Real::Forward()
 
 
 
-namespace {
-std::string normalizeCommand(std::string value)
-{
-    auto not_space = [](unsigned char c) { return !std::isspace(c); };
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
-    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    return value;
-}
-}
+// C3-fix: Web/ROS 命令模块已拆分至 rl_real_command.cpp
 
-void RL_Real::CmdvelCallback(const CmdVel &msg)
-{
-    this->last_cmd_vel_time_ = std::chrono::steady_clock::now();
-    this->cmd_vel = msg;
-    if (this->gamepad_override_active)
-    {
-        PublishRosFeedback("cmd_vel ignored: gamepad override active");
-        return;
-    }
-
-    this->control.x = static_cast<float>(msg.x);
-    this->control.y = static_cast<float>(msg.y);
-    this->control.yaw = static_cast<float>(msg.yaw);
-    std::cout << LOGGER::INFO << "cmd_vel: linear("
-              << msg.x << ", " << msg.y << ", 0"
-              << ") angular(0, 0, " << msg.yaw
-              << ")" << std::endl;
-    PublishRosFeedback("cmd_vel accepted");
-}
-
-void RL_Real::BriefingCallback(const std::string &msg)
-{
-    if (!briefing_audio_) return;
-
-    std::string cmd = msg;
-    while (!cmd.empty() && (cmd.back() == ' ' || cmd.back() == '\n' ||
-                            cmd.back() == '\r' || cmd.back() == '\t')) {
-        cmd.pop_back();
-    }
-    while (!cmd.empty() && (cmd.front() == ' ' || cmd.front() == '\t')) {
-        cmd.erase(cmd.begin());
-    }
-    if (cmd.empty()) return;
-
-    auto publish = [this](const std::string& s) {
-        if (!this->web_bridge_) return;
-        this->web_bridge_->publishBriefingStatus(s);
-    };
-
-    if (cmd == "stop") {
-        briefing_audio_->stop();
-        publish("stopped");
-        return;
-    }
-    if (cmd == "list") {
-        std::string out = "audio list:";
-        for (const auto& n : briefing_audio_->list()) {
-            out += " " + n;
-        }
-        publish(out);
-        return;
-    }
-
-    bool ok = briefing_audio_->play(cmd);
-    publish(ok ? ("playing: " + cmd) : ("not found: " + cmd));
-}
-
-void RL_Real::ImuStreamCallback(bool enabled)
-{
-    SetJXGIMUStreamEnabled(enabled);
-    PublishRosFeedback(std::string("imu_stream=") + (enabled ? "on" : "off"));
-}
-
-void RL_Real::ApplyCommand(const std::string &command)
-{
-    const std::string cmd = normalizeCommand(command);
-    if (cmd.empty()) return;
-
-    if (this->gamepad_override_active && cmd != "feedback" && cmd != "status")
-    {
-        PublishRosFeedback("command ignored: gamepad override active");
-        return;
-    }
-
-    if (cmd == "getup" || cmd == "stand" || cmd == "up")
-    {
-        this->control.SetKeyboard(Input::Keyboard::Num0);
-        PublishRosFeedback("command accepted: getup");
-    }
-    else if (cmd == "getdown" || cmd == "down" || cmd == "lie" || cmd == "sit")
-    {
-        this->control.SetKeyboard(Input::Keyboard::Num9);
-        this->control.x = 0.0f;
-        this->control.y = 0.0f;
-        this->control.yaw = 0.0f;
-        PublishRosFeedback("command accepted: getdown");
-    }
-    else if (cmd == "locomotion" || cmd == "rl" || cmd == "walk" || cmd == "move")
-    {
-        this->control.SetKeyboard(Input::Keyboard::Num1);
-        PublishRosFeedback("command accepted: locomotion");
-    }
-    else if (cmd == "passive" || cmd == "stop" || cmd == "safe_stop")
-    {
-        this->control.SetKeyboard(Input::Keyboard::P);
-        this->control.x = 0.0f;
-        this->control.y = 0.0f;
-        this->control.yaw = 0.0f;
-        this->cmd_vel = CmdVel();
-        PublishRosFeedback("command accepted: passive stop");
-    }
-    else if (cmd == "vel_stop" || cmd == "hold")
-    {
-        this->control.x = 0.0f;
-        this->control.y = 0.0f;
-        this->control.yaw = 0.0f;
-        this->cmd_vel = CmdVel();
-        PublishRosFeedback("command accepted: velocity stop");
-    }
-    else if (cmd == "nav_on")
-    {
-        this->control.navigation_mode = true;
-        PublishRosFeedback("command accepted: nav_on");
-    }
-    else if (cmd == "nav_off")
-    {
-        this->control.navigation_mode = false;
-        PublishRosFeedback("command accepted: nav_off");
-    }
-    else if (cmd == "imu_on")
-    {
-        SetJXGIMUStreamEnabled(true);
-        PublishRosFeedback("command accepted: imu_on");
-    }
-    else if (cmd == "imu_off")
-    {
-        SetJXGIMUStreamEnabled(false);
-        PublishRosFeedback("command accepted: imu_off");
-    }
-    else if (cmd == "zero" || cmd == "setzero" || cmd == "set_zero" || cmd == "set_zero_all" || cmd == "zero_all")
-    {
-        motor_manager.setZeroAllMotors();
-        // 等待电机反馈稳定后重新评估起立条件，避免置零后必须重启程序
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        this->motors_ready_for_stand = this->CheckMotorInitPosition(1.0f);
-        if (this->motors_ready_for_stand) {
-            PublishRosFeedback("command accepted: set_zero_all (motors ready for stand)");
-            this->Notify("info", "motors re-zeroed, ready for stand");
-        } else {
-            PublishRosFeedback("command accepted: set_zero_all (motors not ready)");
-            this->Notify("error", this->motors_not_ready_reason);
-        }
-    }
-    else if (cmd.rfind("zero_motor", 0) == 0)
-    {
-        // 单电机置零：zero_motor <motor_id 0-15>
-        // motor_id = 腿*4 + 关节（腿 0~3 = FL/FR/RL/RR，关节 0=髋/1=大腿/2=小腿/3=足端轮）
-        std::istringstream iss(cmd);
-        std::string token;
-        int motor_id = -1;
-        iss >> token >> motor_id;
-        if (motor_id < 0 || motor_id > 15)
-        {
-            PublishRosFeedback("zero_motor rejected: invalid args (usage: zero_motor <motor_id 0-15>)");
-        }
-        else
-        {
-            motor_manager.setZero(motor_id);
-            // 等待反馈稳定后重新评估起立条件
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            this->motors_ready_for_stand = this->CheckMotorInitPosition(1.0f);
-            std::ostringstream oss;
-            oss << "command accepted: zero_motor motor_id=" << motor_id;
-            PublishRosFeedback(oss.str());
-        }
-    }
-    else if (cmd == "quit" || cmd == "exit")
-    {
-        g_shutdown_flag.store(true);
-        PublishRosFeedback("command accepted: exit");
-    }
-    else if (cmd == "feedback" || cmd == "status")
-    {
-        std::string state_name = this->fsm.current_state_ ? this->fsm.current_state_->GetStateName() : "unknown";
-        PublishRosFeedback("status state=" + state_name + " gamepad_override=" + (this->gamepad_override_active ? "true" : "false"));
-    }
-    else
-    {
-        PublishRosFeedback("unknown command: " + cmd);
-    }
-}
 
 void RL_Real::PublishRosFeedback(const std::string &message)
 {
-    if (!this->web_bridge_) return;
-    this->web_bridge_->publishFeedback(message);
-}
-
-void RL_Real::Notify(const std::string &type, const std::string &content)
-{
-    this->PublishNotify(type, content);
-}
-
-void RL_Real::PublishNotify(const std::string &type, const std::string &content)
-{
-    if (!this->web_bridge_) return;
-
-    uint32_t id = ++this->notify_seq_;
-    double now_sec = std::chrono::duration<double>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-
-    // 手动构建 JSON（无第三方 JSON 库）：内容做最小转义（反斜杠、双引号）
-    std::string esc = content;
-    for (size_t p = 0; (p = esc.find('\\', p)) != std::string::npos; p += 2)
-        esc.replace(p, 1, "\\\\");
-    for (size_t p = 0; (p = esc.find('"', p)) != std::string::npos; p += 2)
-        esc.replace(p, 1, "\\\"");
-
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(3);
-    oss << "{\"id\":" << id
-        << ",\"type\":\"" << type << "\""
-        << ",\"content\":\"" << esc << "\""
-        << ",\"timestamp\":" << now_sec << "}";
-
-    this->web_bridge_->publishNotify(oss.str());
-
-    NotifyRecord rec;
-    rec.json = oss.str();
-    rec.timestamp = now_sec;
-    rec.retry_count = 0;
-    std::lock_guard<std::mutex> lock(this->notify_mutex_);
-    this->notify_pending_[id] = rec;
-}
-
-void RL_Real::NotifyAckCallback(const std::string &json)
-{
-    // 解析 {"id":N,"ok":true}
-    const std::string &s = json;
-    uint32_t id = 0;
-    bool ok = false;
-
-    size_t id_pos = s.find("\"id\"");
-    if (id_pos != std::string::npos) {
-        size_t colon = s.find(':', id_pos);
-        if (colon != std::string::npos) {
-            try {
-                id = static_cast<uint32_t>(std::stoul(s.substr(colon + 1)));
-            } catch (...) {
-                return;
-            }
-        }
-    }
-    size_t ok_pos = s.find("\"ok\"");
-    if (ok_pos != std::string::npos)
-        ok = (s.find("true", ok_pos) != std::string::npos);
-
-    std::lock_guard<std::mutex> lock(this->notify_mutex_);
-    auto it = this->notify_pending_.find(id);
-    if (it != this->notify_pending_.end() && ok)
-        this->notify_pending_.erase(it);
-}
-
-void RL_Real::ProcessNotifyRetries(double now_sec)
-{
-    // 每秒最多处理一次，避免高频循环里频繁加锁
-    if (now_sec - this->notify_last_retry_ts_ < 1.0)
-        return;
-    this->notify_last_retry_ts_ = now_sec;
-
-    std::lock_guard<std::mutex> lock(this->notify_mutex_);
-    for (auto it = this->notify_pending_.begin(); it != this->notify_pending_.end(); )
+#if JXG_ROS_LAYER
+    if (this->feedback_publisher)
     {
-        if (now_sec - it->second.timestamp > 1.0 && it->second.retry_count < 3)
-        {
-            if (this->web_bridge_) this->web_bridge_->publishNotify(it->second.json);
-            it->second.retry_count++;
-            ++it;
-        }
-        else if (it->second.retry_count >= 3)
-        {
-            it = this->notify_pending_.erase(it);  // 超过重试次数丢弃
-        }
-        else
-        {
-            ++it;
-        }
+        std_msgs::msg::String feedback;
+        feedback.data = message;
+        this->feedback_publisher->publish(feedback);
     }
+#endif
+#if JXG_WEB_LAYER
+    // v4 共存: 同一条反馈同时发 ROS topic(/rl_real/feedback)与 WebSocket
+    if (this->web_bridge_) this->web_bridge_->publishFeedback(message);
+#endif
 }
 
-void RL_Real::CheckStandCallback()
-{
-    if (!this->web_bridge_) return;
+// C3-fix: 通知系统模块已拆分至 rl_real_notify.cpp
 
-    // 站立前检测：仅检测，不执行站立动作
-    bool motors_ok = this->CheckMotorInitPosition(1.0f);
-    bool imu_ok = !(this->robot_state.imu.gyroscope[0] == 0.0f &&
-                    this->robot_state.imu.gyroscope[1] == 0.0f &&
-                    this->robot_state.imu.gyroscope[2] == 0.0f);
+// C3-fix: 姿态检测模块已拆分至 rl_real_posture.cpp
 
-    bool ready = motors_ok && imu_ok;
-    std::string reason;
-    if (!motors_ok)
-        reason = this->motors_not_ready_reason;
-    else if (!imu_ok)
-        reason = "IMU no data";
+// C3-fix: 安全起立模块已拆分至 rl_real_safe_getup.cpp
 
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(3);
-    oss << "{\"ready\":" << (ready ? "true" : "false")
-        << ",\"motors_ready\":" << (motors_ok ? "true" : "false")
-        << ",\"imu_ready\":" << (imu_ok ? "true" : "false")
-        << ",\"reason\":\"" << JsonEscape(reason) << "\"}";
-
-    this->web_bridge_->publishCheckStandResult(oss.str());
-}
-
-void RL_Real::PublishMotorState(int num_dofs,
-                                const std::vector<int> &joint_mapping,
-                                const std::vector<float> &lying_down_offset,
-                                const Eigen::VectorXf &all_pos,
-                                const Eigen::VectorXf &all_vel,
-                                const Eigen::VectorXf &all_tau,
-                                const std::vector<float> &all_temp)
-{
-    if (!this->web_bridge_) return;
-
-    // 字段块序：idx,target_pos,real_pos,target_vel,real_vel,target_tau,real_tau,kp,kd,temp
-    // 前端 ros-bridge.js 按 data 长度自适应 stride=10/9，温度为第 10 字段(°C)。
-    constexpr int fields_per_motor = 10;
-    std::vector<float> data;
-    data.reserve(static_cast<size_t>(num_dofs * fields_per_motor));
-
-    for (int i = 0; i < num_dofs; ++i)
-    {
-        int idx = joint_mapping[i];
-        data.push_back(static_cast<float>(idx));
-        data.push_back(this->robot_command.motor_command.q[i]);
-        data.push_back(all_pos[idx] + lying_down_offset[i]);
-        data.push_back(this->robot_command.motor_command.dq[i]);
-        data.push_back(all_vel[idx]);
-        data.push_back(this->robot_command.motor_command.tau[i]);
-        data.push_back(all_tau[idx]);
-        data.push_back(this->robot_command.motor_command.kp[i]);
-        data.push_back(this->robot_command.motor_command.kd[i]);
-        data.push_back(idx < static_cast<int>(all_temp.size()) ? all_temp[idx] : 0.0f);
-    }
-
-    this->web_bridge_->publishMotorState(data);
-}
-
-void RL_Real::PublishImuState()
-{
-    if (!this->web_bridge_) return;
-
-    const auto &imu = this->JXG_state.imu_state;
-    const float qw = static_cast<float>(imu.quaternion[0]);
-    const float qx = static_cast<float>(imu.quaternion[1]);
-    const float qy = static_cast<float>(imu.quaternion[2]);
-    const float qz = static_cast<float>(imu.quaternion[3]);
-
-    const float roll = static_cast<float>(std::atan2(2.0f * (qw * qx + qy * qz),
-                                                     1.0f - 2.0f * (qx * qx + qy * qy)));
-    float pitch_arg = 2.0f * (qw * qy - qz * qx);
-    pitch_arg = std::max(-1.0f, std::min(1.0f, pitch_arg));
-    const float pitch = static_cast<float>(std::asin(pitch_arg));
-    const float yaw = static_cast<float>(std::atan2(2.0f * (qw * qz + qx * qy),
-                                                   1.0f - 2.0f * (qy * qy + qz * qz)));
-
-    // 字段序：quat_w,quat_x,quat_y,quat_z,roll,pitch,yaw,acc_x,acc_y,acc_z,
-    //         gyro_x,gyro_y,gyro_z,pos_north,pos_east,pos_down,vel_body_x,vel_body_y,vel_body_z
-    std::vector<float> data = {
-        qw, qx, qy, qz,
-        roll, pitch, yaw,
-        static_cast<float>(imu.accelerometer[0]),
-        static_cast<float>(imu.accelerometer[1]),
-        static_cast<float>(imu.accelerometer[2]),
-        static_cast<float>(imu.gyroscope[0]),
-        static_cast<float>(imu.gyroscope[1]),
-        static_cast<float>(imu.gyroscope[2]),
-        static_cast<float>(imu.position_north),
-        static_cast<float>(imu.position_east),
-        static_cast<float>(imu.position_down),
-        static_cast<float>(imu.velocity_body[0]),
-        static_cast<float>(imu.velocity_body[1]),
-        static_cast<float>(imu.velocity_body[2])
-    };
-
-    this->web_bridge_->publishImuState(data);
-}
-
-void RL_Real::PublishPose2D()
-{
-    if (!this->web_bridge_) return;
-
-    // 字段序：x,y,z,yaw,vel_x,vel_y,yaw_rate
-    std::vector<float> data = {
-        static_cast<float>(this->odometry_x),
-        static_cast<float>(this->odometry_y),
-        static_cast<float>(this->odometry_z),
-        static_cast<float>(this->odometry_yaw),
-        static_cast<float>(this->velocity_x),
-        static_cast<float>(this->velocity_y),
-        static_cast<float>(this->control.yaw)
-    };
-
-    this->web_bridge_->publishPose2D(data);
-}
+// C3-fix: 遥测发布模块已拆分至 rl_real_telemetry.cpp
 
 void RL_Real::Plot()
 {
@@ -1229,7 +1262,11 @@ void RL_Real::Plot()
     {
         this->plot_real_joint_pos[i].erase(this->plot_real_joint_pos[i].begin());
         this->plot_target_joint_pos[i].erase(this->plot_target_joint_pos[i].begin());
-        this->plot_real_joint_pos[i].push_back(this->JXG_state.motor_state[i].q);
+        {
+            // 跨线程保护:plot 线程读 JXG_state 需与控制环写互斥
+            std::lock_guard<std::mutex> lk(this->jxg_state_mutex_);
+            this->plot_real_joint_pos[i].push_back(this->JXG_state.motor_state[i].q);
+        }
         this->plot_target_joint_pos[i].push_back(this->JXG_cmd.motor_cmd[i].q);
         plt::subplot(this->params.Get<int>("num_of_dofs"), 1, i + 1);
         plt::named_plot("_real_joint_pos", this->plot_t, this->plot_real_joint_pos[i], "r");
@@ -1258,43 +1295,86 @@ void RL_Real::InitLowCmd()
     }
 }
 
-bool RL_Real::CheckMotorInitPosition(float threshold_rad)
+// C3-fix: 安全检查模块已拆分至 rl_real_safety.cpp
+
+#ifdef __linux__
+// ── CPU affinity 巡检线程 ──
+// 兜底机制:定期扫描 /proc/self/task,把非实时(SCHED_OTHER)且 affinity
+// 不在小核 0-3 的线程拉回小核。防止第三方库(如 DDS/ONNX/TBB)在运行时
+// 动态创建线程并自行设置 affinity 飘到大核,与实时控制环争用。
+//
+// 设计约束:
+//   - 普通调度 SCHED_OTHER + nice +10,绝不抢占实时线程
+//   - 自身绑小核 0-3
+//   - 每 2s 扫描一次,30 个线程的遍历开销 < 50us
+//   - 实时线程(FIFO/RR)跳过,由 loop.hpp/usb2can.cpp 自行绑大核
+static void affinityWatchdog()
 {
-    // 轮毂电机索引，跳过检查
-    static const std::vector<int> wheel_indices = {3, 7, 11, 15};
+    // 自身降权 + 绑小核
+    nice(10);
+    cpu_set_t little_cpus;
+    CPU_ZERO(&little_cpus);
+    for (int c = 0; c < 4; ++c) CPU_SET(c, &little_cpus);
+    sched_setaffinity(0, sizeof(little_cpus), &little_cpus);
 
-    auto all_pos = motor_manager.getAllMotorPos();
+    const pid_t self_tid = static_cast<pid_t>(syscall(SYS_gettid));
+    int total_fixed = 0;
+    std::cout << "[affinity-watchdog] 启动, self_tid=" << self_tid
+              << " nice=" << nice(0) << std::endl;
 
-    bool all_ok = true;
-    std::string bad_motors;
-
-    for (int i = 0; i < 16; ++i)
-    {
-        // 跳过轮毂电机
-        if (std::find(wheel_indices.begin(), wheel_indices.end(), i) != wheel_indices.end())
+    while (!g_affinity_watchdog_exit.load()) {
+        DIR *task_dir = opendir("/proc/self/task");
+        if (!task_dir) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
             continue;
-
-        float pos = all_pos[i];
-        if (std::abs(pos) > threshold_rad)
-        {
-            all_ok = false;
-            char buf[64];
-            snprintf(buf, sizeof(buf), " motor[%d]=%.2frad", i, pos);
-            bad_motors += buf;
         }
-    }
 
-    if (!all_ok)
-    {
-        this->motors_not_ready_reason = "Motor(s) too far from zero:" + bad_motors
-            + " (threshold=" + std::to_string(threshold_rad) + "rad). Please re-zero motors.";
-    }
+        int round_fixed = 0;
+        struct dirent *ent;
+        while ((ent = readdir(task_dir)) != nullptr) {
+            if (ent->d_name[0] == '.') continue;
+            const long tid = std::atol(ent->d_name);
+            if (tid <= 0 || tid == self_tid) continue;
 
-    return all_ok;
+            // 实时线程(FIFO=1, RR=2)跳过:由 loop.hpp/usb2can.cpp 自行绑大核
+            const int policy = sched_getscheduler(static_cast<pid_t>(tid));
+            if (policy == SCHED_FIFO || policy == SCHED_RR) continue;
+
+            // 检查当前 affinity,非 0-3 则纠正
+            cpu_set_t cur;
+            CPU_ZERO(&cur);
+            if (sched_getaffinity(static_cast<pid_t>(tid), sizeof(cur), &cur) != 0) continue;
+
+            bool need_fix = false;
+            for (int c = 4; c < 8; ++c) {
+                if (CPU_ISSET(c, &cur)) { need_fix = true; break; }
+            }
+            if (need_fix) {
+                if (sched_setaffinity(static_cast<pid_t>(tid), sizeof(little_cpus), &little_cpus) == 0) {
+                    ++round_fixed;
+                }
+            }
+        }
+        closedir(task_dir);
+
+        if (round_fixed > 0) {
+            total_fixed += round_fixed;
+            std::cout << "[affinity-watchdog] 本轮纠正 " << round_fixed
+                      << " 个线程回小核(累计 " << total_fixed << ")" << std::endl;
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
 }
+#endif
 
 int main(int argc, char **argv)
 {
+    InstallCrashDumper();  // 必须最先安装:崩溃原因/backtrace 写 /tmp/rl_crash.log
+    // 版本与构建时间(CMake 生成,编译进二进制)
+    std::cout << LOGGER::INFO << "[version] rl_real_JXG v" << APP_VERSION
+              << " build " << BUILD_NUMBER
+              << " built " << BUILD_TIMESTAMP << std::endl;
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
@@ -1305,34 +1385,116 @@ int main(int argc, char **argv)
                   << "(实时线程仍可能遇到缺页抖动;以 root 运行可消除)" << std::endl;
     }
 
-    // 解析命令行参数
-    bool wheel_mode = false;
-    WebConfig web_cfg;
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "wheel") {
-            wheel_mode = true;
-        } else if (arg == "--web-port" && i + 1 < argc) {
-            web_cfg.web_port = std::atoi(argv[++i]);
-        } else if (arg == "--web-root" && i + 1 < argc) {
-            web_cfg.web_root = argv[++i];
-        } else if (arg == "--briefing-audio-dir" && i + 1 < argc) {
-            web_cfg.briefing_audio_dir = argv[++i];
-        } else if (arg == "-h" || arg == "--help") {
-            std::cout << "Usage: rl_real_JXG [wheel] [--web-port N] [--web-root DIR]"
-                         " [--briefing-audio-dir DIR]" << std::endl;
-            return 0;
+#ifdef __linux__
+    // ── RK3576 大小核 CPU 布局(与 systemd 单元 CPUAffinity=0-7 配合) ──
+    // 主线程在此把自身亲和掩码设为 A53 小核簇 0-3。之后所有未显式绑核的普通
+    // SCHED_OTHER 线程(rclcpp/FastDDS、WebBridge HTTP+WS、ONNX Runtime worker、
+    // main 的 spin)在创建时继承该掩码,全部落在小核。
+    // 硬实时线程不受影响:LoopFunc 对 cpu>=0 的环(imu=4、control/rl=6)和
+    // USB2CAN 的 8 个 CAN 线程(5/7)在 start 后自行 pthread_setaffinity_np 绑大核。
+    // 收益:DDS/Web 突发流量不再与 200Hz 控制环/50Hz 推理争用 CPU6 大核,
+    // 也不污染其 L2;4 个 A53 小核从此参与负载(此前被 systemd CPUAffinity=4-7 闲置)。
+    {
+        cpu_set_t little_cpus;
+        CPU_ZERO(&little_cpus);
+        for (int c = 0; c < 4; ++c) CPU_SET(c, &little_cpus);
+        if (sched_setaffinity(0, sizeof(little_cpus), &little_cpus) != 0) {
+            std::cerr << "[main] WARN: 主线程绑小核(0-3)失败: " << std::strerror(errno)
+                      << "(普通线程可能仍散落到大核)" << std::endl;
+        } else {
+            std::cout << "[main] 主线程(及未显式绑核的普通线程)亲和掩码=CPU0-3 (A53 小核簇);"
+                         " RT 环/CAN 线程自行绑 CPU4-7 (A72 大核簇)" << std::endl;
+        }
+
+        // 纠正在此之前已创建的线程(如库的全局初始化线程)的 affinity。
+        // sched_setaffinity(0,...) 仅影响调用线程,已存在的线程仍保留旧掩码(0-7),
+        // 会飘到大核与 RT 线程争用。遍历 /proc/self/task 把所有现存线程统一拉回小核。
+        // 实时线程(imu/CAN/control/rl)此时尚未创建,不受影响。
+        DIR *task_dir = opendir("/proc/self/task");
+        if (task_dir) {
+            pid_t self = getpid();
+            struct dirent *ent;
+            int fixed = 0;
+            while ((ent = readdir(task_dir)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                long tid = std::atol(ent->d_name);
+                if (tid <= 0 || tid == self) continue;
+                if (sched_setaffinity(tid, sizeof(little_cpus), &little_cpus) == 0) {
+                    ++fixed;
+                }
+            }
+            closedir(task_dir);
+            if (fixed > 0) {
+                std::cout << "[main] 已将 " << fixed << " 个预存线程亲和掩码纠正为 CPU0-3"
+                          << std::endl;
+            }
         }
     }
+#endif
 
-    RL_Real rl_real(wheel_mode, web_cfg);
-    std::cout << "RL_Real JXG started in " << (wheel_mode ? "wheel" : "normal") << " mode" << std::endl;
-    // 控制环/推理环由 LoopFunc 线程驱动；主线程保持与原 ROS spin 相同的 20ms 节奏
+#ifdef __linux__
+    // 启动 affinity 巡检线程:兜底纠正运行时被第三方库改到大核的非实时线程
+    std::thread affinity_watchdog_thread(affinityWatchdog);
+#endif
+
+    // v5: 无启动参数,固定执行 JXGw;Web 层为独立 web_server 进程,
+    // 主程序不再接受 wheel/--web-port/--web-root 等参数
+    WebConfig web_cfg;
+
+#if defined(USE_ROS1) && defined(USE_ROS)
+    ros::init(argc, argv, "rl_JXG");
+      RL_Real rl_real(web_cfg);
+
+      // 使用 ros::ok() 检查退出
+      while (ros::ok() && !g_shutdown_flag.load()) {
+          ros::spinOnce();
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+
+      // 手动关闭 ROS
+      ros::shutdown();
+
+#elif defined(USE_ROS2_REAL_CONTROL) || (defined(USE_ROS2) && defined(USE_ROS))
+    rclcpp::init(argc, argv);
+      // v4: ROS2 分支同样传入 web_cfg; JXG_WEB_LAYER=1 时构造函数内会启动
+      // WebBridge(:8088), 与 rclcpp 同进程共存 —— spin_some 驱动 ROS 话题,
+      // WebBridge 内部自有线程驱动 HTTP/WebSocket。
+      auto rl_node = std::make_shared<RL_Real>(web_cfg);
+      std::cout << "RL_Real JXGw started (ROS2"
+#if JXG_WEB_LAYER
+                << " + WebSocket"
+#endif
+                << ")" << std::endl;
+
+      // 使用 while 循环替代 spin;rclcpp::spin_some(node) 已弃用,
+      // 改用 SingleThreadedExecutor::spin_some()
+      rclcpp::executors::SingleThreadedExecutor executor;
+      executor.add_node(rl_node);
+      while (rclcpp::ok() && !g_shutdown_flag.load()) {
+          executor.spin_some();
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+
+      rclcpp::shutdown();
+
+#else
+    RL_Real rl_real(web_cfg);
+    std::cout << "RL_Real JXGw started" << std::endl;
+    // while (1) std::this_thread::sleep_for(std::chrono::seconds(10));
     while (!g_shutdown_flag.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+  }
+
+#endif
+std::cout << "Program exiting..." << std::endl;
+
+#ifdef __linux__
+    // 停止 affinity 巡检线程
+    g_affinity_watchdog_exit.store(true);
+    if (affinity_watchdog_thread.joinable()) {
+        affinity_watchdog_thread.join();
     }
+#endif
 
-    std::cout << "Program exiting..." << std::endl;
-
-    return 0;
+return 0;
 }

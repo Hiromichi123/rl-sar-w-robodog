@@ -12,7 +12,7 @@
 # observations_history = 6 steps (current frame first, newest-first)
 
 JXGw/himloco:
-  model_name: "v12b_smooth_m3400_sim.onnx"
+  model_name: "policy_v56_deploybias_m3899_sim.onnx"
   num_observations: 57
   observations: ["ang_vel", "gravity_vec", "commands", "dof_pos", "dof_vel", "actions"]
   observations_history: [0, 1, 2, 3, 4, 5]  # index 0 = newest frame

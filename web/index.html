@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#111827" />
-    <title>网页机器人仿真</title>
+    <title>机器人本体控制单元（JJJS-MCC-M1）</title>
     <script>
       // 桌面版页面:移动设备或窄屏(≤768px)自动跳转移动版 mobile.html
       // 跳转条件:UA 含移动标识 ∨ 多点触屏+粗指针 ∨ 窗口宽度 ≤ 768px
@@ -14,10 +14,14 @@
         var touch  = navigator.maxTouchPoints > 1 && matchMedia('(pointer: coarse)').matches;
         var narrow = window.innerWidth <= 768;
         var mobile = /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent) || touch || narrow;
-        if (mobile) location.replace('./mobile.html');
+        if (mobile) location.replace('./mobile.html?v=2026102001');
       })();
     </script>
-    <link rel="stylesheet" href="./css/style.css?v=1030" />
+    <link rel="stylesheet" href="./css/style.css?v=1090" />
+    <link rel="manifest" href="./manifest.json" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="stylesheet" href="./vendor/xterm/xterm.css?v=530" />
     <script type="importmap">
       {
         "imports": {
@@ -34,7 +38,7 @@
   </head>
   <body class="sim-off">
     <main id="app">
-      <section class="viewport" aria-label="网页机器人仿真视图">
+      <section class="viewport" aria-label="机器人本体控制单元视图">
         <canvas id="scene"></canvas>
         <div id="loading-overlay" class="loading-overlay">
           <div class="loading-spinner"></div>
@@ -45,12 +49,12 @@
           <div class="sim-disabled-card">
             <div class="sim-disabled-icon">🧊</div>
             <div class="sim-disabled-title">3D 仿真未启动</div>
-            <div class="sim-disabled-desc">模型网格(约 40MB)不会加载。ROS 连接、数据看板、实时曲线、录制与真机遥控均可正常使用。</div>
+            <div class="sim-disabled-desc">模型网格(约 40MB)不会加载。ROS 连接、数据看板、实时曲线与真机遥控均可正常使用。</div>
             <button id="sim-enable-btn" class="ros-btn sim-enable-btn" type="button">▶ 启动 3D 仿真</button>
           </div>
         </div>
         <div class="topbar">
-          <div class="brand">网页机器人仿真</div>
+          <div class="brand">机器人本体控制单元 <span class="brand-sub">JJJS-MCC-M1</span></div>
           <div id="load-status" class="load-status">读取机器人模型...</div>
           <span id="ros-status" class="ros-status ros-offline" title="ROS 连接状态">未连接</span>
         </div>
@@ -69,7 +73,6 @@
             </select>
           </label>
           <div class="view-buttons">
-            <button id="recorder-start-btn" class="ros-btn recorder-start" type="button" disabled>● 开始录制</button>
             <button id="view-home" title="恢复默认视角">视图复位</button>
             <button id="view-front" title="切换正视视角">正视</button>
             <button id="view-side" title="切换侧视视角">侧视</button>
@@ -93,50 +96,58 @@
         <div class="panel-backdrop" id="panel-backdrop"></div>
       </section>
       <aside class="control-panel" id="control-panel">
-        <div class="control-tabs" role="tablist" aria-label="控制方式">
-          <button id="rosdebug-tab" class="active" role="tab" aria-selected="true" aria-controls="rosdebug-control-view" data-control-tab="rosdebug">话题调试</button>
-          <button id="alarm-tab" role="tab" aria-selected="false" aria-controls="alarm-control-view" data-control-tab="alarm">报警配置</button>
-          <button id="config-tab" role="tab" aria-selected="false" aria-controls="config-control-view" data-control-tab="config">录制列表</button>
-          <button id="movement-tab" role="tab" aria-selected="false" aria-controls="movement-control-view" data-control-tab="movement">移动控制</button>
-          <button id="joint-tab" role="tab" aria-selected="false" aria-controls="joint-control-view" data-control-tab="joint">关节控制</button>
-          <button id="cartesian-tab" role="tab" aria-selected="false" aria-controls="cartesian-control-view" data-control-tab="cartesian">笛卡尔控制</button>
-          <button id="curves-tab" role="tab" aria-selected="false" aria-controls="curves-control-view" data-control-tab="curves">可视化</button>
+        <div class="control-tabs-wrap">
+          <div class="control-tabs-groupbar" role="tablist" aria-label="功能分组">
+            <button type="button" class="tabs-group-btn active" data-tab-group="control" aria-selected="true">🎮 控制</button>
+            <button type="button" class="tabs-group-btn" data-tab-group="system" aria-selected="false">⚙ 系统</button>
+          </div>
+          <div class="control-tabs" role="tablist" aria-label="控制方式" data-group-tabs="control">
+          <button id="movement-tab" class="active" role="tab" aria-selected="true" aria-controls="movement-control-view" data-control-tab="movement">移动控制</button>
+          <button id="ros-tab" role="tab" aria-selected="false" aria-controls="ros-control-view" data-control-tab="ros">ROS 指令</button>
+          <button id="joint-tab" role="tab" aria-selected="false" aria-controls="joint-control-view" data-control-tab="joint">关节管理</button>
           <button id="dashboard-tab" role="tab" aria-selected="false" aria-controls="dashboard-control-view" data-control-tab="dashboard">数据看板</button>
-          <button id="camera-tab" role="tab" aria-selected="false" aria-controls="camera-control-view" data-control-tab="camera">相机</button>
-          <button id="lidar-tab" role="tab" aria-selected="false" aria-controls="lidar-control-view" data-control-tab="lidar">雷达</button>
-          <button id="zero-tab" role="tab" aria-selected="false" aria-controls="zero-control-view" data-control-tab="zero">置零</button>
+          <button id="rc-tab" role="tab" aria-selected="false" aria-controls="rc-control-view" data-control-tab="rc">遥控学习</button>
+          <button id="models-tab" role="tab" aria-selected="false" aria-controls="models-control-view" data-control-tab="models">主控模型</button>
+          </div>
+          <div class="control-tabs" role="tablist" aria-label="控制方式" data-group-tabs="system" hidden>
+          <button id="terminal-tab" role="tab" aria-selected="false" aria-controls="terminal-control-view" data-control-tab="terminal">系统终端</button>
+          <button id="system-tab" role="tab" aria-selected="false" aria-controls="system-control-view" data-control-tab="system">系统管理</button>
+          <button id="syslog-tab" role="tab" aria-selected="false" aria-controls="syslog-control-view" data-control-tab="syslog">系统日志</button>
+          <button id="services-tab" role="tab" aria-selected="false" aria-controls="services-control-view" data-control-tab="services">系统服务</button>
+          <button id="processes-tab" role="tab" aria-selected="false" aria-controls="processes-control-view" data-control-tab="processes">系统进程</button>
+          <button id="net-tab" role="tab" aria-selected="false" aria-controls="net-control-view" data-control-tab="net">网络管理</button>
+          <button id="dev-tab" role="tab" aria-selected="false" aria-controls="dev-control-view" data-control-tab="dev">设备管理</button>
+          <button id="files-tab" role="tab" aria-selected="false" aria-controls="files-control-view" data-control-tab="files">系统文件</button>
+          <button id="logs-tab" role="tab" aria-selected="false" aria-controls="logs-control-view" data-control-tab="logs">主控日志</button>
+          <button id="battery-tab" role="tab" aria-selected="false" aria-controls="battery-control-view" data-control-tab="battery">电池</button>
+          <button id="about-tab" role="tab" aria-selected="false" aria-controls="about-control-view" data-control-tab="about">关于</button>
+          </div>
         </div>
-        <!-- 数据录制与复现页面:录制记录列表 -->
-        <div id="config-control-view" class="control-view" role="tabpanel" aria-labelledby="config-tab" hidden>
-          <!-- 录制 & 复现(IndexedDB 存储) -->
-          <section class="cartesian-section config-section" aria-label="录制记录与复现列表">
+        <!-- 「ROS 指令」页签:真机行为命令(站立/趴下/置零/作业交底等) -->
+        <div id="ros-control-view" class="control-view" role="tabpanel" aria-labelledby="ros-tab" hidden>
+          <section class="ros-movement-section">
             <div class="section-heading">
-              <h2>录制记录</h2>
-              <p class="config-hint">录制按钮已在页签上方。下方列表展示已保存到 IndexedDB 的所有录制,可点击复现/删除。复现时会自动切换到录制时的机器人模型。录制不依赖网络,断网后也可本地回放。</p>
+              <span>真机 ROS 命令</span>
+              <span id="ros-cmd-status" class="ros-status-pill ros-offline" title="ROS 未连接时按钮无效">ROS 离线</span>
             </div>
-            <div class="recorder-control">
-              <button id="replay-stop-btn" class="ros-btn replay-stop" type="button" disabled>■ 停止复现</button>
-              <button id="recordings-clear-btn" class="ros-btn recordings-clear" type="button" title="清空所有录制记录">清空全部</button>
+            <!-- 当前姿态显示:后端 8Hz posture 帧驱动(趴下/站立/强化学习/切换中) -->
+            <div class="posture-bar" aria-label="当前机器人姿态">
+              <span class="posture-bar-label">当前姿态</span>
+              <span class="posture-pill posture-unknown" title="FSM 状态机原始状态">— 未知 —</span>
+              <span class="posture-fsm" title="FSM 当前状态名"></span>
             </div>
-            <!-- 复现拖动条 host:平时隐藏,在复现某条记录时其内容被移动到对应行的 .rec-seek-slot -->
-            <div id="replay-seek-host" hidden aria-hidden="true">
-              <div class="replay-seek-wrap" aria-label="复现进度">
-                <span id="replay-cur-time" class="replay-time replay-time-cur">00:00</span>
-                <input id="replay-seek" type="range" class="replay-seek" min="0" max="0" step="10" value="0" disabled aria-label="拖动复现进度" />
-                <span id="replay-total-time" class="replay-time replay-time-total">00:00</span>
-              </div>
-            </div>
-            <div class="recordings-list-wrap">
-              <div class="recordings-list-header">
-                <span class="rec-name-col">记录</span>
-                <span class="rec-model-col">模型</span>
-                <span class="rec-meta-col">时间</span>
-                <span class="rec-frames-col">帧数</span>
-                <span class="rec-actions-col">操作</span>
-              </div>
-              <ul id="recordings-list" class="recordings-list">
-                <li class="rec-empty">尚无录制记录 — 连接 ROS 后点击「开始录制」即可</li>
-              </ul>
+            <div class="behavior-pills" aria-label="行为命令">
+              <button type="button" class="behavior-pill is-stand" data-behavior="getup">站立 · getup</button>
+              <button type="button" class="behavior-pill is-crouch" data-behavior="getdown">趴下 · getdown</button>
+              <button type="button" class="behavior-pill is-passive" data-behavior="passive">被动 · passive</button>
+              <button type="button" class="behavior-pill is-loco" id="locomotion-btn" data-behavior="locomotion" title="进入强化学习行走前自动做站立校验,未站稳则拒绝">进入强化学习</button>
+              <button type="button" class="behavior-pill is-block" data-behavior="rl_block" title="立即切断强化学习输出并原地保持(SafeHold),需 getup 恢复">退出强化学习</button>
+              <button type="button" class="behavior-pill is-check" data-behavior="probe_motors" title="逐个给 16 台电机发小角度偏移检测是否可控(约3~6s,失败自动重测),结果仅供参考不自动恢复">探针检测 · probe</button>
+              <button type="button" class="behavior-pill" data-behavior="vel_stop">速度清零 · vel_stop</button>
+              <button type="button" class="behavior-pill" data-behavior="zero">电机置零 · zero</button>
+              <button type="button" class="behavior-pill is-check check-stand-btn" title="卧姿校验(趴下→站立前):检查 12 腿关节近零位和 IMU/CAN 状态(不触发站立)。结果作为起立门禁记录,趴下后作废,每次起立前需重新校验">卧姿校验</button>
+              <button type="button" class="behavior-pill is-checkstanding check-standing-btn" title="站姿校验(进入强化学习前):12 个腿关节是否站在期望站姿且静止(不触发动作)">站姿校验</button>
+              <button type="button" class="behavior-pill" id="ros-can-init" title="CAN 初始化:重跑 can_setup.sh,按 USB 序列号重命名 can0~4 并重新 UP。用于电机上电后接口仍 DOWN、bounce 超时或接口名错位时,免重启主程序恢复通信。初始化期间 CAN 瞬断约 1~2 秒,请在趴姿/吊装状态下执行">CAN 初始化</button>
             </div>
           </section>
         </div>
@@ -159,7 +170,7 @@
             </ul>
           </section>
         </div>
-        <div id="joint-control-view" class="control-view" hidden>
+        <div id="scene-controls-host" class="control-view" hidden>
           <div id="controls" class="controls" aria-live="polite"></div>
         </div>
         <div id="cartesian-control-view" class="control-view" role="tabpanel" aria-labelledby="cartesian-tab" hidden>
@@ -292,41 +303,32 @@
             <div id="curves-list" class="curves-list"><!-- 每条关节行由 curves.js 动态生成 --></div>
           </section>
         </div>
-        <div id="movement-control-view" class="control-view" role="tabpanel" aria-labelledby="movement-tab" hidden>
+        <div id="movement-control-view" class="control-view" role="tabpanel" aria-labelledby="movement-tab">
           <div class="twist-readout" aria-label="最近一次 cmd_vel">
-            <span class="twist-title">Twist /rl_real/cmd_vel</span>
-            <span class="twist-vals">
-              <span class="twist-v"><span>x</span><output id="twist-lin-x">0.00</output>m/s</span>
-              <span class="twist-v"><span>y</span><output id="twist-lin-y">0.00</output>m/s</span>
-              <span class="twist-v"><span>z</span><output id="twist-lin-z">0.00</output>m/s</span>
-              <span class="twist-v"><span>ω</span><output id="twist-ang-z">0.00</output>rad/s</span>
-            </span>
-            <span id="twist-count" class="twist-count">0 帧</span>
+            <div class="twist-head">
+              <span class="twist-title">Twist /rl_real/cmd_vel</span>
+              <span id="twist-count" class="twist-count">0 帧</span>
+            </div>
+            <div class="twist-vals">
+              <label class="twist-v" title="点击启用/禁用该方向输出"><input type="checkbox" data-axis="x" checked><span class="twist-v-top"><span class="twist-axis">x</span><span class="twist-unit">m/s</span></span><output id="twist-lin-x">0.00</output><span class="twist-gauge"><i class="twist-gauge-fill" id="twist-gauge-x"></i></span></label>
+              <label class="twist-v" title="点击启用/禁用该方向输出"><input type="checkbox" data-axis="y"><span class="twist-v-top"><span class="twist-axis">y</span><span class="twist-unit">m/s</span></span><output id="twist-lin-y">0.00</output><span class="twist-gauge"><i class="twist-gauge-fill" id="twist-gauge-y"></i></span></label>
+              <label class="twist-v" title="点击启用/禁用该方向输出"><input type="checkbox" data-axis="z"><span class="twist-v-top"><span class="twist-axis">z</span><span class="twist-unit">m/s</span></span><output id="twist-lin-z">0.00</output><span class="twist-gauge"><i class="twist-gauge-fill" id="twist-gauge-z"></i></span></label>
+              <label class="twist-v" title="点击启用/禁用该方向输出"><input type="checkbox" data-axis="omega" checked><span class="twist-v-top"><span class="twist-axis">ω</span><span class="twist-unit">rad/s</span></span><output id="twist-ang-z">0.00</output><span class="twist-gauge"><i class="twist-gauge-fill" id="twist-gauge-w"></i></span></label>
+            </div>
           </div>
-          <section class="ros-movement-section">
-            <div class="section-heading">
-              <span>真机 ROS 命令</span>
-              <span id="ros-cmd-status" class="ros-status-pill ros-offline" title="ROS 未连接时按钮无效">ROS 离线</span>
+          <!-- 当前姿态显示:后端 8Hz posture 帧驱动(趴下/站立/强化学习/切换中) -->
+          <div class="posture-bar" aria-label="当前机器人姿态">
+            <div class="posture-head">
+              <span class="posture-bar-label">当前姿态</span>
+              <span class="posture-fsm" title="FSM 当前状态名"></span>
+              <!-- BMS 剩余电量(充放静状态已融合:充电显 ⚡、放/静显 🔋):
+                   由电池页 bms_data 帧驱动(蓝牙后台常驻,切到本页即可见),与移动端移动控制页一致 -->
+              <span id="move-batt-soc" class="move-batt-soc" title="BMS 剩余电量">🔋 --%</span>
             </div>
-            <div class="behavior-pills" aria-label="行为命令">
-              <button type="button" class="behavior-pill is-stand" data-behavior="getup">站立 · getup</button>
-              <button type="button" class="behavior-pill is-crouch" data-behavior="getdown">趴下 · getdown</button>
-              <button type="button" class="behavior-pill is-passive" data-behavior="passive">被动 · passive</button>
-              <button type="button" class="behavior-pill is-loco" data-behavior="locomotion">进入 RL · locomotion</button>
-              <button type="button" class="behavior-pill" data-behavior="vel_stop">速度清零 · vel_stop</button>
-              <button type="button" class="behavior-pill" data-behavior="zero">电机置零 · zero</button>
-              <button type="button" class="behavior-pill is-check" id="check-stand-btn" title="检查电机零位和 IMU 状态(不触发站立)">检查站立</button>
-              <div id="briefing-scenes" class="briefing-scenes" title="点选多个场景(按点选顺序连播),再点一次取消">
-                <button type="button" class="scene-chip" data-scene="elevator"><span class="chip-order"></span>电梯</button>
-                <button type="button" class="scene-chip" data-scene="forklift"><span class="chip-order"></span>叉车</button>
-                <button type="button" class="scene-chip" data-scene="lifting"><span class="chip-order"></span>吊装</button>
-                <button type="button" class="scene-chip" data-scene="warehouse"><span class="chip-order"></span>仓库</button>
-                <button type="button" class="scene-chip" data-scene="height"><span class="chip-order"></span>高处</button>
-              </div>
-              <button type="button" class="behavior-pill is-brief" id="briefing-play-btn" title="语音播报所选作业交底场景(/rl_briefing/play)">▶ 作业交底</button>
-              <button type="button" class="behavior-pill is-stopbrief" id="briefing-stop-btn" title="打断当前语音播报">■ 停止播报</button>
+            <div class="posture-pills">
+              <span class="posture-pill posture-unknown" title="FSM 状态机原始状态">— 未知 —</span>
             </div>
-          </section>
+          </div>
           <div id="movement-quadruped-chassis" hidden>
             <section class="cartesian-section chassis-section">
               <div class="joy-speed-bars" role="group" aria-label="摇杆速度上限">
@@ -346,6 +348,16 @@
                   <output class="joy-gear-val joy-ang-val">0.50</output>
                   <span class="joy-gear-unit">rad/s</span>
                 </div>
+              </div>
+              <div class="joy-lock-bar">
+                <button type="button" id="joy-cruise-lock" class="joy-lock-btn" aria-pressed="false"
+                  title="速度锁定(定速巡航,左杆):开启瞬间保持当前 X/Y 速度,之后左杆松手不回正、不衰减;关闭立即停车并恢复松手回中。右杆 ω/Z 不受影响">
+                  <span class="joy-lock-dot" aria-hidden="true"></span><span class="joy-lock-text">速度锁定：关</span>
+                </button>
+                <button type="button" id="joy-cruise-lock-z" class="joy-lock-btn" aria-pressed="false"
+                  title="转向锁定(定速巡航,右杆):开启瞬间保持当前 ω 角速度与 Z 高度,之后右杆松手不回正、不衰减;关闭立即转向归零、Z 回站姿并恢复松手回中。左杆 vx/vy 不受影响">
+                  <span class="joy-lock-dot" aria-hidden="true"></span><span class="joy-lock-text">转向锁定：关</span>
+                </button>
               </div>
               <div class="joystick-dual">
                 <div class="joy-col">
@@ -371,10 +383,25 @@
             <div class="section-heading">
               <h2>电机数据</h2>
             </div>
-            <div class="dashboard-motor-head" aria-hidden="true">
-              <span>序号</span><span>关节</span><span title="真机 CAN 总线 ID：髋关节=4、大腿=3、小腿=2、足端轮=1，悬停各行可查看 MasterID">CAN ID</span><span>目标位置</span><span>实际位置</span><span>目标速度</span><span>实际速度</span><span>目标力矩</span><span>实际力矩</span><span title="位置比例增益（刚度）：跟踪目标位置的“弹簧硬度”，越大关节越硬">kp 刚度</span><span title="速度微分增益（阻尼）：抑制振动，越大运动越平稳、响应变钝">kd 阻尼</span><span title="电机温度（°C）">温度 °C</span>
+            <!-- 视图切换(仅四足模型显示):
+                 按字段 = 4×4 网格,行 FL/FR/RL/RR、列 髋/大腿/小腿/轮,一次只显示一个
+                          指标的全 16 台电机值,便于比对「相同项」;
+                 按电机 = 每台一张卡片,看单机全貌。选择持久化到 localStorage。 -->
+            <div class="dash-view-bar" id="dash-view-bar" hidden>
+              <div class="dash-view-switch" role="group" aria-label="看板视图">
+                <button type="button" class="dash-view-btn is-active" data-dash-view="field">按字段</button>
+                <button type="button" class="dash-view-btn" data-dash-view="motor">按电机</button>
+              </div>
+              <div class="dash-field-chips" id="dash-field-chips" role="group" aria-label="指标选择"></div>
             </div>
-            <div id="dashboard-motor-grid" class="dashboard-motor-grid"></div>
+            <div class="dash-scroll">
+              <div class="dashboard-motor-head" aria-hidden="true">
+                <span>序号</span><span>关节</span><span title="真机 CAN 总线 ID：髋关节=4、大腿=3、小腿=2、足端轮=1，悬停各行可查看 MasterID">CAN ID</span><span>目标位置</span><span>实际位置</span><span>目标速度</span><span>实际速度</span><span>目标力矩</span><span>实际力矩</span><span title="位置比例增益（刚度）：跟踪目标位置的“弹簧硬度”，越大关节越硬">kp 刚度</span><span title="速度微分增益（阻尼）：抑制振动，越大运动越平稳、响应变钝">kd 阻尼</span><span title="电机温度（°C）">温度 °C</span><span title="距上次收到该电机有效反馈的时间：正常为毫秒级；≥0.5s 橙色预警、≥1s 红色视为断线；“等待”表示从未解析到该电机反馈">更新</span>
+              </div>
+              <div id="dashboard-motor-grid" class="dashboard-motor-grid"></div>
+            </div>
+            <!-- 按字段视图:同一指标的全机 16 格矩阵(值由 dashboard.js 填充),与置零矩阵同构 -->
+            <div id="dashboard-field-grid" class="dashboard-field-grid" hidden></div>
           </section>
           <!-- ② IMU 数据:姿态/四元数/加速度/角速度/位置/速度 共 19 项 -->
           <section class="dashboard-section">
@@ -506,26 +533,37 @@
             </div>
           </section>
         </div>
-        <!-- 置零:单电机选择矩阵 + 单电机/全部置零(危险操作,仅趴下/被动态使用) -->
-        <div id="zero-control-view" class="control-view" role="tabpanel" aria-labelledby="zero-tab" hidden>
+        <!-- 关节管理:置零(电机零点校准) + 电机可控性探针 -->
+        <div id="joint-control-view" class="control-view" role="tabpanel" aria-labelledby="joint-tab" hidden>
           <section class="zero-section">
+            <div class="section-heading">
+              <h2>关节管理</h2>
+              <span class="zero-red-hint">⚠ 危险操作:置零会把电机当前位置写为零点!仅当机器狗处于趴下/被动状态时使用</span>
+            </div>
             <div class="zero-warning">
-              ⚠ 危险操作:置零会把电机<b>当前位置</b>写为零点!仅当机器狗处于<b>趴下 / 被动状态</b>、且关节已位于期望零位时使用,误操作将导致姿态异常。格内数值为实时位置(rad),<b class="zero-red-hint">红色 = 偏离零位 &gt; 0.1 rad</b>。
+              格内数值为实时位置(rad),<b class="zero-red-hint">红色 = 偏离零位 &gt; 0.1 rad</b>。点击格子选择电机,探针/置零状态在格内显示。
             </div>
             <div class="zero-grid-header" aria-hidden="true">
               <span>髋关节</span><span>大腿</span><span>小腿</span><span>足端轮</span>
             </div>
             <div id="zero-motor-grid" class="zero-motor-grid" aria-label="电机选择矩阵(4 腿 × 4 关节,可多选)"></div>
-            <div class="zero-footer">
-              <span id="zero-selected-label" class="zero-selected-label">未选择电机</span>
+            <div class="joint-action-bar">
               <button type="button" id="zero-select-red-btn" class="behavior-pill zero-select-red-btn" data-ui-only title="一键选中所有偏离零位超过 0.1 rad 的电机">全选标红电机</button>
-              <button type="button" id="zero-motor-btn" class="behavior-pill zero-motor-btn" disabled title="对选中的电机逐个执行置零(二次确认)">置零选中电机</button>
-              <button type="button" class="behavior-pill zero-all-btn" data-behavior="zero" title="遍历 16 个电机全部置零">全部置零 · zero</button>
+              <button type="button" id="zero-motor-btn" class="behavior-pill zero-motor-btn" disabled title="对选中的电机逐个执行置零(二次确认)">置零选中</button>
+              <button type="button" class="behavior-pill zero-all-btn" data-behavior="zero" title="遍历 16 个电机全部置零">全部置零</button>
+              <span class="joint-action-sep"></span>
+              <button type="button" id="probe-selected-btn" class="behavior-pill is-check" disabled title="对选中的电机逐个执行探针">探针选中</button>
+              <button type="button" id="probe-all-btn" class="behavior-pill is-check" data-behavior="probe_motors">全部探针</button>
+              <button type="button" class="behavior-pill is-check probe-leg-btn" data-leg="0">FL 腿</button>
+              <button type="button" class="behavior-pill is-check probe-leg-btn" data-leg="1">FR 腿</button>
+              <button type="button" class="behavior-pill is-check probe-leg-btn" data-leg="2">RL 腿</button>
+              <button type="button" class="behavior-pill is-check probe-leg-btn" data-leg="3">RR 腿</button>
+              <span id="probe-status" class="probe-status">待机</span>
             </div>
           </section>
         </div>
-        <!-- ROS 话题调试:接收区(顶部全宽) + 话题列表/发送区(左右布局) -->
-        <div id="rosdebug-control-view" class="control-view" role="tabpanel" aria-labelledby="rosdebug-tab">
+        <!-- ROS 话题调试:接收区(顶部全宽) + 话题列表/发送区(左右布局,页签入口已收敛,视图保留供调试) -->
+        <div id="rosdebug-control-view" class="control-view" role="tabpanel" hidden>
           <!-- ① 接收区(顶部全宽) -->
           <section class="cartesian-section">
             <div class="section-heading">
@@ -585,8 +623,519 @@
               aria-label="发送消息 JSON"></textarea>
           </section>
         </div>
+        <!-- 实时主控日志页签: journalctl -u rl-real-jxg -f, 经 WS log 帧推送 -->
+        <div id="logs-control-view" class="control-view" role="tabpanel" aria-labelledby="logs-tab" hidden>
+          <section class="logview-section">
+            <div class="section-heading">
+              <span>主控日志</span>
+              <span id="logview-status" class="logview-status">未订阅</span>
+            </div>
+            <div class="logview-toolbar">
+              <button type="button" class="ros-btn" id="logview-pause">⏸ 暂停</button>
+              <button type="button" class="ros-btn" id="logview-clear">清屏</button>
+              <button type="button" class="ros-btn" id="logview-save">保存日志</button>
+              <button type="button" class="ros-btn" id="logview-reconnect" title="退订后重新订阅(纯实时,向上滚动可加载历史)">重新订阅</button>
+              <label class="logview-autoscroll"><input type="checkbox" id="logview-autoscroll" checked> 自动滚动</label>
+              <input type="search" id="logview-filter" class="logview-filter" placeholder="关键词过滤…" autocomplete="off" />
+              <span id="logview-count" class="logview-count">0 行</span>
+            </div>
+            <div id="logview-screen" class="logview-screen" aria-label="主控日志输出"></div>
+          </section>
+        </div>
+        <!-- 终端页签: 仅 WebSSH -->
+        <div id="terminal-control-view" class="control-view" role="tabpanel" aria-labelledby="terminal-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>WebSSH 系统终端(root)</span>
+              <span id="sys-term-status" class="sys-term-status">未连接</span>
+            </div>
+            <div class="sys-term-toolbar">
+              <button type="button" class="ros-btn" id="sys-term-btn">打开系统终端</button>
+              <span class="sys-warn">⚠ 终端以 root 权限在机器人本机执行命令,请勿执行危险操作;意外中断会自动重连</span>
+            </div>
+            <div id="sys-term-mount" class="sys-term-mount"></div>
+          </section>
+        </div>
+        <!-- 系统页签: 服务管理 / 电源 / 高频日志 / 管理令牌 -->
+        <div id="system-control-view" class="control-view" role="tabpanel" aria-labelledby="system-tab" hidden>
+          <!-- 系统资源监控 -->
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>系统资源监控</span>
+              <span id="sys-monitor-status" class="sys-ftp-status">采集中…</span>
+            </div>
+            <div class="sys-monitor-grid">
+              <div class="sys-monitor-card">
+                <div class="sys-monitor-label">CPU 使用率</div>
+                <div class="sys-monitor-value" id="sys-cpu-pct">--</div>
+                <div class="sys-monitor-bar"><div id="sys-cpu-bar" class="sys-monitor-bar-fill"></div></div>
+              </div>
+              <div class="sys-monitor-card">
+                <div class="sys-monitor-label">内存 (Mem)</div>
+                <div class="sys-monitor-value" id="sys-mem-info">--</div>
+                <div class="sys-monitor-bar"><div id="sys-mem-bar" class="sys-monitor-bar-fill"></div></div>
+              </div>
+              <div class="sys-monitor-card">
+                <div class="sys-monitor-label">交换空间 (Swap)</div>
+                <div class="sys-monitor-value" id="sys-swap-info">--</div>
+                <div class="sys-monitor-bar"><div id="sys-swap-bar" class="sys-monitor-bar-fill"></div></div>
+              </div>
+              <div class="sys-monitor-card">
+                <div class="sys-monitor-label">任务数 (Tasks)</div>
+                <div class="sys-monitor-value" id="sys-tasks">--</div>
+              </div>
+              <div class="sys-monitor-card">
+                <div class="sys-monitor-label">负载平均值 (Load)</div>
+                <div class="sys-monitor-value" id="sys-load">--</div>
+              </div>
+              <div class="sys-monitor-card">
+                <div class="sys-monitor-label">运行时间 (Uptime)</div>
+                <div class="sys-monitor-value" id="sys-uptime">--</div>
+              </div>
+              <div class="sys-monitor-card sys-monitor-card-full">
+                <div class="sys-monitor-label">硬盘占用 (Disk)</div>
+                <div id="sys-disks" class="sys-disks-list"></div>
+              </div>
+            </div>
+          </section>
+          <!-- 报警阈值配置:低电量 + 电机温度(均仅提醒,不干预控制) -->
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>低电量报警阈值</span>
+              <span id="battery-threshold-status" style="font-size:12px;color:#8fa3b8">默认 SOC&lt;15% / 电压&lt;20V</span>
+            </div>
+            <p class="config-hint">触发后按周期持续推送报警通知(SOC 或电压任一低于阈值即触发)。</p>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end">
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <label style="font-size:12px;color:#8fa3b8" for="bms-thr-soc">SOC 阈值 (%)</label>
+                <input id="bms-thr-soc" type="number" min="0" max="100" step="1" value="15"
+                       style="width:100px;padding:6px 8px;border:1px solid #2a3a4a;border-radius:4px;background:#1a2530;color:#e0e8f0;font-size:14px">
+              </div>
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <label style="font-size:12px;color:#8fa3b8" for="bms-thr-voltage">电压阈值 (V)</label>
+                <input id="bms-thr-voltage" type="number" min="0" max="60" step="0.1" value="20"
+                       style="width:100px;padding:6px 8px;border:1px solid #2a3a4a;border-radius:4px;background:#1a2530;color:#e0e8f0;font-size:14px">
+              </div>
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <label style="font-size:12px;color:#8fa3b8" for="bms-thr-interval">提示周期 (秒)</label>
+                <input id="bms-thr-interval" type="number" min="1" max="3600" step="1" value="10"
+                       style="width:100px;padding:6px 8px;border:1px solid #2a3a4a;border-radius:4px;background:#1a2530;color:#e0e8f0;font-size:14px">
+              </div>
+              <button type="button" class="ros-btn" id="bms-thr-apply" style="font-size:13px;padding:6px 16px">应用阈值</button>
+              <button type="button" class="ros-btn" id="bms-thr-query" style="font-size:13px;padding:6px 16px">查询当前</button>
+            </div>
+          </section>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>电机温度告警阈值</span>
+              <span id="temp-threshold-status" style="font-size:12px;color:#8fa3b8">默认 滑动中值&gt;75°C</span>
+            </div>
+            <p class="config-hint">16 电机滑动中值温度任一超过阈值即推送告警(仅提醒,不干预控制)。</p>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end">
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <label style="font-size:12px;color:#8fa3b8" for="temp-thr-value">温度阈值 (°C)</label>
+                <input id="temp-thr-value" type="number" min="30" max="120" step="1" value="75"
+                       style="width:100px;padding:6px 8px;border:1px solid #2a3a4a;border-radius:4px;background:#1a2530;color:#e0e8f0;font-size:14px">
+              </div>
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <label style="font-size:12px;color:#8fa3b8" for="temp-thr-interval">提示周期 (秒)</label>
+                <input id="temp-thr-interval" type="number" min="1" max="3600" step="1" value="30"
+                       style="width:100px;padding:6px 8px;border:1px solid #2a3a4a;border-radius:4px;background:#1a2530;color:#e0e8f0;font-size:14px">
+              </div>
+              <button type="button" class="ros-btn" id="temp-thr-apply" style="font-size:13px;padding:6px 16px">应用阈值</button>
+              <button type="button" class="ros-btn" id="temp-thr-query" style="font-size:13px;padding:6px 16px">查询当前</button>
+            </div>
+          </section>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>机器人服务(rl-real-jxg)</span>
+              <span id="sys-svc-status" class="sys-ftp-status">状态查询中…</span>
+            </div>
+            <div class="sys-svc-metrics" id="sys-svc-metrics">运行状态:- &nbsp; 开机自启:- &nbsp; PID:- &nbsp; FIFO 线程:- &nbsp; cgroup:-</div>
+            <div class="sys-power-bar">
+              <button type="button" class="ros-btn" id="sys-svc-start">启动</button>
+              <button type="button" class="ros-btn" id="sys-svc-stop">停止</button>
+              <button type="button" class="ros-btn" id="sys-svc-restart">重启服务</button>
+              <button type="button" class="ros-btn" id="sys-svc-enable">开启自启</button>
+              <button type="button" class="ros-btn" id="sys-svc-disable">关闭自启</button>
+              <button type="button" class="ros-btn" id="sys-svc-refresh">刷新状态</button>
+            </div>
+            <div id="sys-svc-msg" class="sys-svc-msg"></div>
+            <span class="sys-hint">由独立 Web 进程执行 systemctl:重启/停止控制程序不影响本页面连接;FIFO 线程应为 11/11,cgroup 应为 /</span>
+          </section>
+          <section class="sys-section">
+            <div class="section-heading"><span>系统电源</span></div>
+            <div class="sys-power-bar">
+              <button type="button" class="ros-btn sys-power-reboot" id="sys-reboot-btn">⟳ 重启系统</button>
+              <button type="button" class="ros-btn sys-power-off" id="sys-poweroff-btn">⏻ 关机</button>
+              <span class="sys-warn">⚠ 真机危险操作,均需二次确认;关机后只能现场重新上电</span>
+            </div>
+          </section>
+          <section class="sys-section">
+            <div class="section-heading"><span>高频数据日志(200Hz HR CSV)</span></div>
+            <div class="sys-power-bar">
+              <button type="button" class="ros-btn" id="sys-hrlog-btn">▶ 开启高频记录</button>
+              <span id="sys-hrlog-status" class="sys-ftp-status">状态查询中…</span>
+              <span class="sys-hint">关闭后停止写入 cmake_build/bin/logs/*_hr_*.csv,重新开启会新建文件</span>
+            </div>
+          </section>
+          <section class="sys-section">
+            <div class="section-heading"><span>管理令牌(可选)</span></div>
+            <div class="sys-power-bar">
+              <input type="password" id="sys-admin-token" class="sys-ftp-path" placeholder="WEB_ADMIN_TOKEN(服务端未设置时留空即可)" autocomplete="off" />
+              <button type="button" class="ros-btn" id="sys-admin-token-apply">保存并重连</button>
+              <span class="sys-hint">仅当服务端配置了 WEB_ADMIN_TOKEN 环境变量时需要</span>
+            </div>
+            <div class="sys-power-bar">
+              <button type="button" class="ros-btn sys-power-off" id="sys-logout-btn">退出登录</button>
+              <span class="sys-hint">结束本次会话并返回登录页</span>
+            </div>
+          </section>
+        </div>
+        <!-- 系统日志页签 -->
+        <div id="syslog-control-view" class="control-view" role="tabpanel" aria-labelledby="syslog-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>系统日志(本次启动)</span>
+              <span id="sys-syslog-status" class="sys-ftp-status">未加载</span>
+            </div>
+            <div class="sys-power-bar">
+              <button type="button" class="ros-btn" id="sys-syslog-load">⟳ 加载日志</button>
+              <button type="button" class="ros-btn" id="sys-syslog-clear">清屏</button>
+              <label class="logview-autoscroll"><input type="checkbox" id="sys-syslog-autoscroll" checked> 自动滚动</label>
+              <input type="search" id="sys-syslog-filter" class="sys-ftp-search" placeholder="关键词过滤…" autocomplete="off" style="max-width:200px" />
+              <select id="sys-syslog-lines" class="sys-page-size" style="max-width:110px">
+                <option value="500">500 行</option>
+                <option value="2000" selected>2000 行</option>
+                <option value="5000">5000 行</option>
+                <option value="10000">10000 行</option>
+              </select>
+              <span id="sys-syslog-count" class="sys-hint">0 行</span>
+            </div>
+            <div id="sys-syslog-screen" class="logview-screen" aria-label="系统日志输出"></div>
+          </section>
+        </div>
+        <!-- 服务管理页签 -->
+        <div id="services-control-view" class="control-view" role="tabpanel" aria-labelledby="services-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>系统服务管理</span>
+              <button type="button" class="ros-btn" id="sys-svclist-refresh" style="font-size:12px;padding:2px 10px">⟳ 刷新</button>
+            </div>
+            <div class="sys-power-bar">
+              <input type="text" id="sys-svclist-search" class="sys-ftp-search" placeholder="🔍 搜索服务名/描述" autocomplete="off" />
+              <input type="text" id="sys-svclist-new-name" class="sys-ftp-path" placeholder="新服务名(如 my-demo.service)" style="max-width:240px" />
+              <button type="button" class="ros-btn" id="sys-svclist-new">＋ 新建服务</button>
+            </div>
+            <div class="sys-svclist-wrap">
+              <table class="sys-ftp-table" id="sys-svclist-table">
+                <thead><tr><th>服务名</th><th>LOAD</th><th>ACTIVE</th><th>SUB</th><th>描述</th><th>操作</th></tr></thead>
+                <tbody id="sys-svclist-body"></tbody>
+              </table>
+            </div>
+            <div class="sys-ftp-pager" id="sys-svclist-pager">
+              <select class="sys-page-size" id="sys-svclist-page-size">
+                <option value="10">10 条/页</option>
+                <option value="20">20 条/页</option>
+                <option value="50">50 条/页</option>
+                <option value="100">100 条/页</option>
+              </select>
+              <button type="button" class="ros-btn" id="sys-svclist-page-prev">‹ 上一页</button>
+              <div id="sys-svclist-page-nums" class="sys-ftp-page-nums"></div>
+              <button type="button" class="ros-btn" id="sys-svclist-page-next">下一页 ›</button>
+            </div>
+          </section>
+        </div>
+        <!-- 进程管理页签 -->
+        <div id="processes-control-view" class="control-view" role="tabpanel" aria-labelledby="processes-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>系统进程</span>
+              <button type="button" class="ros-btn" id="sys-ps-refresh" style="font-size:12px;padding:2px 10px">⟳ 刷新</button>
+            </div>
+            <div class="sys-power-bar">
+              <input type="search" id="sys-ps-search" class="sys-ftp-search" placeholder="🔍 搜索 PID/进程名/命令行" autocomplete="off" />
+              <input type="text" id="sys-ps-start-cmd" class="sys-ftp-path" placeholder="启动命令(如 sleep 300)" style="max-width:320px" />
+              <button type="button" class="ros-btn" id="sys-ps-start">▶ 启动</button>
+            </div>
+            <div class="sys-svclist-wrap">
+              <table class="sys-ftp-table" id="sys-ps-table">
+                <thead><tr><th>PID</th><th>PPID</th><th>进程名</th><th>状态</th><th>RSS</th><th>CPU(s)</th><th>命令行</th><th>操作</th></tr></thead>
+                <tbody id="sys-ps-body"></tbody>
+              </table>
+            </div>
+            <div class="sys-ftp-pager" id="sys-ps-pager">
+              <select class="sys-page-size" id="sys-ps-page-size">
+                <option value="10">10 条/页</option>
+                <option value="20">20 条/页</option>
+                <option value="50">50 条/页</option>
+                <option value="100">100 条/页</option>
+              </select>
+              <button type="button" class="ros-btn" id="sys-ps-page-prev">‹ 上一页</button>
+              <div id="sys-ps-page-nums" class="sys-ftp-page-nums"></div>
+              <button type="button" class="ros-btn" id="sys-ps-page-next">下一页 ›</button>
+            </div>
+          </section>
+        </div>
+        <!-- 网络管理页签: 结构化接口表(ip addr 等价) + 原始输出 -->
+        <div id="net-control-view" class="control-view" role="tabpanel" aria-labelledby="net-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>网络管理(ip addr)</span>
+              <span id="sys-net-status" class="sys-ftp-status">未加载</span>
+              <button type="button" class="ros-btn" id="sys-net-refresh" style="font-size:12px;padding:2px 10px">⟳ 刷新</button>
+              <button type="button" class="ros-btn" id="sys-net-raw" style="font-size:12px;padding:2px 10px" title="弹出 ip addr 命令原始输出">原始输出</button>
+            </div>
+            <div class="sys-power-bar">
+              <input type="search" id="sys-net-search" class="sys-ftp-search" placeholder="🔍 搜索接口名/IP/MAC" autocomplete="off" />
+              <span class="sys-hint">只读展示:接口状态/IP/MAC/MTU/收发统计;修改网络配置请用终端页(如 netplan/ip)。</span>
+            </div>
+            <div class="sys-svclist-wrap">
+              <table class="sys-ftp-table" id="sys-net-table">
+                <thead><tr><th>接口</th><th>类型</th><th>状态</th><th>IPv4</th><th>IPv6</th><th>MAC</th><th>MTU</th><th>收/发(含错误包)</th></tr></thead>
+                <tbody id="sys-net-body"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="sys-section" id="netcfg-section">
+            <div class="section-heading">
+              <span>网络配置(持久化)</span>
+              <span id="netcfg-mode" class="sys-ftp-status">未读取</span>
+              <button type="button" class="ros-btn" id="netcfg-load" style="font-size:12px;padding:2px 10px">⟳ 读取当前</button>
+            </div>
+            <div class="sys-power-bar" style="flex-wrap:wrap;gap:8px">
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px">接口
+                <select id="netcfg-iface" style="padding:4px 6px;border-radius:6px"></select>
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px">网关
+                <input id="netcfg-gw" type="text" placeholder="留空=不设默认路由" style="width:170px" autocomplete="off" />
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px">DNS
+                <input id="netcfg-dns" type="text" placeholder="逗号分隔: 223.5.5.5,119.29.29.29" style="width:260px" autocomplete="off" />
+              </label>
+            </div>
+            <div id="netcfg-ip-rows" style="display:flex;flex-direction:column;gap:6px;margin:8px 0"></div>
+            <details style="margin:4px 0 2px">
+              <summary style="cursor:pointer;font-size:12px;color:#888;padding:2px 0">
+                静态路由 &amp; 策略路由(高级)
+              </summary>
+              <div style="margin-top:6px">
+                <div style="display:flex;gap:6px;align-items:center;font-size:12px;margin-bottom:4px">
+                  <span style="color:#52dccd">静态路由</span>
+                  <span style="color:#777;font-size:11px">目标网段 → 下一跳 (可选路由表号, 空=主表)</span>
+                  <button type="button" class="ros-btn" id="netcfg-add-route" style="font-size:11px;padding:1px 8px;margin-left:auto">+ 添加</button>
+                </div>
+                <div id="netcfg-route-rows" style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px"></div>
+                <div style="display:flex;gap:6px;align-items:center;font-size:12px;margin-bottom:4px">
+                  <span style="color:#52dccd">策略路由</span>
+                  <span style="color:#777;font-size:11px">源网段 → 路由表号(需要先声明对应该表的静态路由)</span>
+                  <button type="button" class="ros-btn" id="netcfg-add-policy" style="font-size:11px;padding:1px 8px;margin-left:auto">+ 添加</button>
+                </div>
+                <div id="netcfg-policy-rows" style="display:flex;flex-direction:column;gap:4px"></div>
+              </div>
+            </details>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <button type="button" class="ros-btn" id="netcfg-add-ip" style="font-size:12px">+ 添加 IP</button>
+              <button type="button" class="ros-btn ros-btn-wide" id="netcfg-apply">应用静态配置</button>
+              <button type="button" class="ros-btn" id="netcfg-restore" style="font-size:12px">恢复 DHCP</button>
+            </div>
+            <div class="sys-hint" style="margin-top:6px">写入 /etc/netplan/90-jxg-net.yaml 并 netplan try(120s 自动回滚,重启持久);多 IP 在上方逐行添加;修改当前管理地址会瞬时断连(刷新重连即可);误配可点「恢复 DHCP」一键回滚,回滚前会自动备份为 .bak。</div>
+          </section>
+        </div>
+        <!-- 设备管理页签: /dev 顶层枚举 -->
+        <div id="dev-control-view" class="control-view" role="tabpanel" aria-labelledby="dev-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>设备管理器(/dev)</span>
+              <span id="sys-dev-status" class="sys-ftp-status">未加载</span>
+              <button type="button" class="ros-btn" id="sys-dev-refresh" style="font-size:12px;padding:2px 10px">⟳ 刷新</button>
+            </div>
+            <div class="sys-power-bar">
+              <input type="search" id="sys-dev-search" class="sys-ftp-search" placeholder="🔍 搜索设备名/类型/链接目标" autocomplete="off" />
+            </div>
+            <div class="sys-svclist-wrap">
+              <table class="sys-ftp-table" id="sys-dev-table">
+                <thead><tr><th>名称</th><th>类型</th><th>类别</th><th>主:次设备号</th><th>大小</th><th>链接目标</th></tr></thead>
+                <tbody id="sys-dev-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+        <div id="models-control-view" class="control-view" role="tabpanel" aria-labelledby="models-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>主控模型管理</span>
+              <span id="sys-model-status" class="sys-ftp-status">加载中…</span>
+            </div>
+            <div class="sys-power-bar">
+              <button type="button" class="ros-btn" id="sys-model-refresh">刷新</button>
+              <button type="button" class="ros-btn" id="sys-model-new">＋ 新建模型配置</button>
+              <input type="search" id="sys-model-search" class="sys-ftp-search" placeholder="🔍 搜索模型配置/文件名(支持模糊)" autocomplete="off" />
+              <span class="sys-hint">列出 policy/JXGw/ 下各模型配置目录的文件;「启用」改写 config.yaml 的 model_name 字段,无需重启服务:先趴下(退出强化学习),再重新进入强化学习即热加载新模型。</span>
+            </div>
+            <div id="sys-model-body" class="sys-model-body"></div>
+            <div id="sys-model-pager" class="sys-ftp-pager" hidden>
+              <button type="button" class="ros-btn" id="sys-model-page-prev">‹ 上一页</button>
+              <div id="sys-model-page-nums" class="sys-ftp-page-nums"></div>
+              <button type="button" class="ros-btn" id="sys-model-page-next">下一页 ›</button>
+            </div>
+          </section>
+        </div>
+        <!-- 文件页签: WebFTP 文件管理 -->
+        <div id="files-control-view" class="control-view" role="tabpanel" aria-labelledby="files-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading"><span>WebFTP 系统文件管理</span><span id="sys-ftp-status" class="sys-ftp-status"></span></div>
+            <div class="sys-ftp-nav">
+              <button type="button" class="ros-btn" id="sys-ftp-refresh" title="刷新" aria-label="刷新">⟳</button>
+              <button type="button" class="ros-btn" id="sys-ftp-up" title="返回上一级" aria-label="返回上一级">↩</button>
+              <div id="sys-ftp-crumb" class="sys-ftp-crumb"></div>
+              <button type="button" class="ros-btn" id="sys-ftp-go" title="编辑路径并跳转" aria-label="编辑路径并跳转">→</button>
+            </div>
+            <div class="sys-ftp-bar">
+              <input type="search" id="sys-ftp-search" class="sys-ftp-search" placeholder="🔍 搜索当前目录(支持模糊)" autocomplete="off" />
+              <button type="button" class="ros-btn" id="sys-ftp-mkdir">新建目录</button>
+              <button type="button" class="ros-btn" id="sys-ftp-mkfile">新建文件</button>
+              <button type="button" class="ros-btn" id="sys-ftp-paste" disabled>粘贴</button>
+              <label class="sys-ftp-uplabel">文件上传
+                <input type="file" id="sys-ftp-upfile" hidden multiple />
+              </label>
+              <button type="button" class="ros-btn" id="sys-ftp-sel-dl" hidden>批量下载</button>
+              <button type="button" class="ros-btn sys-power-off" id="sys-ftp-sel-del" hidden>批量删除</button>
+            </div>
+            <div class="sys-ftp-tablewrap">
+              <table class="sys-ftp-table">
+                <thead><tr><th class="sys-ftp-sel-head"><input type="checkbox" id="sys-ftp-selall" title="全选/全不选" /></th><th>名称</th><th>大小</th><th>修改时间</th><th class="sys-ftp-act-head">操作</th></tr></thead>
+                <tbody id="sys-ftp-body"></tbody>
+              </table>
+            </div>
+            <div id="sys-ftp-pager" class="sys-ftp-pager" hidden>
+              <button type="button" class="ros-btn" id="sys-ftp-page-prev">‹ 上一页</button>
+              <div id="sys-ftp-page-nums" class="sys-ftp-page-nums"></div>
+              <button type="button" class="ros-btn" id="sys-ftp-page-next">下一页 ›</button>
+            </div>
+          </section>
+        </div>
+        <!-- 遥控学习页签:CH340 串口学习/克隆(后端 web_server 独占串口,与控制环隔离) -->
+        <div id="rc-control-view" class="control-view" role="tabpanel" aria-labelledby="rc-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>遥控学习 / 克隆</span>
+              <button type="button" class="ros-btn" id="rc-refresh" style="font-size:12px;padding:2px 10px">⟳ 刷新</button>
+            </div>
+            <!-- 设备状态 -->
+            <div class="sys-power-bar">
+              <span id="rc-dev-status" class="ros-status-pill ros-offline">设备状态</span>
+              <span id="rc-dev-path" style="font-size:12px;color:#8fa3b8"></span>
+              <span id="rc-learn-state" class="ros-status-pill">未学习</span>
+            </div>
+            <!-- 命名、学习、发送与保存 -->
+            <div class="sys-power-bar">
+              <input type="text" id="rc-name-input" class="sys-ftp-path" placeholder="名称(留空用 hex)" style="max-width:200px" />
+              <input type="text" id="rc-pending-hex" class="sys-ftp-path" placeholder="待保存 hex(可编辑)" style="max-width:150px;font-family:monospace" spellcheck="false" />
+              <button type="button" class="ros-btn" id="rc-learn-btn">学习</button>
+              <button type="button" class="ros-btn" id="rc-test-btn">发送</button>
+              <button type="button" class="ros-btn" id="rc-save-btn">保存</button>
+              <button type="button" class="ros-btn" id="rc-clear-btn">清除</button>
+            </div>
+            <p class="config-hint">开启学习后触发其它遥控器;捕获到的有效帧自动填入「待保存 hex」,可点「发送」验证,再点「保存」落盘(名称留空时默认用该 hex);「清除」清空名称与待保存 hex。</p>
+            <!-- 已学码列表 -->
+            <div class="section-heading">
+              <span>已学码</span>
+              <span id="rc-list-count" style="font-size:12px;color:#8fa3b8">0 条</span>
+            </div>
+            <div class="sys-svclist-wrap">
+              <table class="sys-ftp-table" id="rc-table">
+                <thead><tr><th>ID</th><th>名称</th><th>HEX</th><th>时间</th><th>操作</th></tr></thead>
+                <tbody id="rc-table-body"><tr><td colspan="5" style="color:#8fa3b8">暂无已学码</td></tr></tbody>
+              </table>
+            </div>
+            <div id="rc-result" style="font-size:12px;padding:4px 2px;color:#8fa3b8" hidden></div>
+          </section>
+        </div>
+        <!-- 电池页签:通过 web_server 蓝牙 BLE 线程读取 BMS(后台常驻连接) -->
+        <div id="battery-control-view" class="control-view" role="tabpanel" aria-labelledby="battery-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>电池 BMS</span>
+              <span id="battery-status" class="ros-status-pill ros-offline">未连接</span>
+              <button type="button" class="ros-btn" id="battery-power" style="font-size:12px;padding:2px 10px">蓝牙:开</button>
+              <button type="button" class="ros-btn" id="battery-refresh" style="font-size:12px;padding:2px 10px">⟳ 刷新</button>
+            </div>
+            <p class="config-hint">通过蓝牙读取 BMS 数据。蓝牙连接默认后台常驻,可用「蓝牙」开关手动启动/关闭;打开本页签即可查看。</p>
+            <div id="battery-metrics" class="bat-grid"><div class="bat-empty">暂无数据</div></div>
+            <div class="section-heading">
+              <span>单体电压</span>
+              <span id="battery-cell-summary" style="font-size:12px;color:#8fa3b8"></span>
+            </div>
+            <div id="battery-cells" class="bat-cells"><div class="bat-empty">暂无单体电压</div></div>
+          </section>
+        </div>
+        <!-- 关于页签:主控/Web 服务版本与构建信息(便于区分 vN 部署) -->
+        <div id="about-control-view" class="control-view" role="tabpanel" aria-labelledby="about-tab" hidden>
+          <section class="sys-section">
+            <div class="section-heading">
+              <span>版本信息</span>
+              <span id="about-build-match" class="about-match" hidden></span>
+              <button type="button" class="ros-btn" id="about-refresh" style="font-size:12px;padding:2px 10px">⟳ 刷新</button>
+            </div>
+            <p class="config-hint">主控程序版本经 WebSocket 命令实时查询(主控离线时仅显示 Web 服务信息);构建时间相同的两个进程属于同一次编译。</p>
+            <div class="about-grid">
+              <div class="about-card about-card-rl">
+                <div class="about-card-head">
+                  <span class="about-ico">🤖</span>
+                  <div class="about-card-names">
+                    <div class="about-card-title">主控程序</div>
+                    <div class="about-card-sub">rl_real_JXG</div>
+                  </div>
+                  <span class="about-pill" id="about-rl-status">--</span>
+                </div>
+                <div class="about-ver" id="about-rl-version">--</div>
+                <div class="about-rows">
+                  <div class="about-row"><span>🔢 构建号</span><b id="about-rl-build">--</b></div>
+                  <div class="about-row"><span>🕒 构建时间</span><b id="about-rl-built">--</b></div>
+                  <div class="about-row"><span>📁 运行目录</span><b id="about-rl-cwd">--</b></div>
+                </div>
+              </div>
+              <div class="about-card about-card-web">
+                <div class="about-card-head">
+                  <span class="about-ico">🌐</span>
+                  <div class="about-card-names">
+                    <div class="about-card-title">Web 服务</div>
+                    <div class="about-card-sub">jxg-web</div>
+                  </div>
+                  <span class="about-pill" id="about-web-proc">--</span>
+                </div>
+                <div class="about-ver" id="about-web-version">--</div>
+                <div class="about-rows">
+                  <div class="about-row"><span>🔢 构建号</span><b id="about-web-build">--</b></div>
+                  <div class="about-row"><span>🕒 构建时间</span><b id="about-web-built">--</b></div>
+                  <div class="about-row"><span>📁 运行目录</span><b id="about-web-cwd">--</b></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
       </aside>
     </main>
-    <script type="module" src="./js/main.js?v=1071"></script>
+    <script src="./vendor/xterm/xterm.js?v=530"></script>
+    <script src="./vendor/xterm/fit-addon.js?v=080"></script>
+    <script type="module" src="./js/main.js?v=2026102103"></script>
+    <script>
+      // PWA Service Worker 注册:使页面在机载计算机关机/重启期间仍可从缓存加载。
+      // 注意:仅注册,不拦截 WebSocket(/ws 遥测命令),离线时前端显示断开态。
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          // 新 SW 接管时自动刷新一次:首次安装不刷,升级接管才刷,防止旧 SW 页面滞留旧资源
+          var swHadController = !!navigator.serviceWorker.controller;
+          navigator.serviceWorker.addEventListener('controllerchange', function () {
+            if (!swHadController) { swHadController = true; return; }
+            location.reload();
+          });
+          navigator.serviceWorker.register('./service-worker.js').catch(function (e) {
+            console.warn('[SW] 注册失败:', e);
+          });
+        });
+      }
+    </script>
   </body>
 </html>

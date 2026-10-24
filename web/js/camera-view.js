@@ -15,7 +15,7 @@ import {
   addStatusListener,
   addCameraFrameListener, addCameraImuListener, addCameraVioListener, addCameraVioStatusListener,
   setCameraChannel, setCameraTelemetryEnabled,
-} from './ros-bridge.js?v=981';
+} from './ros-bridge.js?v=2026102001';
 
 /** 当前选中的画面通道 */
 let currentChannel = 'color';

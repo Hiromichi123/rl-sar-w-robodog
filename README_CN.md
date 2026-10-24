@@ -2,18 +2,21 @@
 
 [![Ubuntu 20.04/22.04](https://img.shields.io/badge/Ubuntu-20.04/22.04-blue.svg?logo=ubuntu)](https://ubuntu.com/)
 [![macOS](https://img.shields.io/badge/macOS-Experimental-orange.svg?logo=apple)](https://www.apple.com/macos/)
+[![ROS Noetic](https://img.shields.io/badge/ros-noetic-brightgreen.svg?logo=ros)](https://wiki.ros.org/noetic)
+[![ROS2 Foxy/Humble](https://img.shields.io/badge/ros2-foxy/humble-brightgreen.svg?logo=ros)](https://wiki.ros.org/foxy)
+[![Gazebo](https://img.shields.io/badge/Gazebo-Classic-lightgrey.svg?logo=gazebo)](http://gazebosim.org/)
 [![MuJoCo](https://img.shields.io/badge/MuJoCo-3.2.7-orange.svg?logo=mujoco)](https://mujoco.org/)
 [![License](https://img.shields.io/badge/license-Apache2.0-yellow.svg?logo=apache)](https://opensource.org/license/apache-2.0)
 
 > 支持**IsaacGym**和**IsaacSim**
 >
-> **无 ROS 依赖**(主控程序内置 WebSocket 服务器与 Web 调试台)
+> 支持**ROS-Noetic**和**ROS2-Foxy/Humble**
 >
 > 支持**libtorch**和**onnxruntime**
 >
 > 支持**Linux**和**macOS**(只支持Mujoco仿真)
 >
-> 支持**Mujoco**仿真
+> 支持**Gazebo**和**Mujoco**(部分支持)
 >
 > 支持**Locomotion**和**Dance**
 
@@ -44,7 +47,15 @@ sudo apt install cmake g++ build-essential libyaml-cpp-dev libeigen3-dev libboos
 brew install boost lcm yaml-cpp tbb libomp pkg-config glfw
 ```
 
-本项目**不依赖 ROS**。编译产物直接在宿主机运行，无需安装任何 ROS 发行版。
+如果需要使用ROS，安装下列依赖包：
+
+```bash
+# ros-noetic (Ubuntu20.04)
+sudo apt install ros-noetic-teleop-twist-keyboard ros-noetic-controller-interface ros-noetic-gazebo-ros-control ros-noetic-joint-state-controller ros-noetic-effort-controllers ros-noetic-joint-trajectory-controller ros-noetic-joy ros-noetic-ros-control ros-noetic-ros-controllers ros-noetic-controller-manager
+
+# ros2-foxy (Ubuntu20.04) / ros2-humble (Ubuntu22.04)
+sudo apt install ros-$ROS_DISTRO-teleop-twist-keyboard ros-$ROS_DISTRO-ros2-control ros-$ROS_DISTRO-ros2-controllers ros-$ROS_DISTRO-control-toolbox ros-$ROS_DISTRO-robot-state-publisher ros-$ROS_DISTRO-joint-state-publisher-gui ros-$ROS_DISTRO-gazebo-ros2-control ros-$ROS_DISTRO-gazebo-ros-pkgs ros-$ROS_DISTRO-xacro
+```
 
 ## 编译
 
@@ -54,10 +65,22 @@ brew install boost lcm yaml-cpp tbb libomp pkg-config glfw
 ./build.sh
 ```
 
-若想删除构建产物，可以使用下列命令
+若想单独编译某几个包，可以在后面加上包名
+
+```bash
+./build.sh package1 package2
+```
+
+若想删除构建，可以使用下列命令，此命令会删除所有编译产物和创建的软链接
 
 ```bash
 ./build.sh -c  # or ./build.sh --clean
+```
+
+如果不需要仿真，只在机器人上运行，可以使用CMake进行编译，同时禁用ROS（编译生成的可执行文件在`cmake_build/bin`中，库在`cmake_build/lib`中）
+
+```bash
+./build.sh -m  # or ./build.sh --cmake
 ```
 
 若想使用Mujoco仿真器
@@ -69,14 +92,25 @@ brew install boost lcm yaml-cpp tbb libomp pkg-config glfw
 详细的使用说明可以通过`./build.sh -h`查看
 
 ```bash
-Usage: ./build.sh [OPTIONS]
+Usage: ./build.sh [OPTIONS] [PACKAGE_NAMES...]
 
 Options:
-  -c, --clean    Clean build artifacts (cmake_build/)
-  -m, --cmake    Build using CMake (default, for hardware deployment)
-  -mj,--mujoco   Build with MuJoCo simulator support (CMake only)
+  -c, --clean    Clean workspace (remove symlinks and build artifacts)
+  -m, --cmake    Build using CMake (for hardware deployment only)
+  -mj,--mujoco   Build with MuJoCo simulator support (CMake only)"
   -h, --help     Show this help message
+
+Examples:
+  ./build.sh                    # Build all ROS packages
+  ./build.sh package1 package2  # Build specific ROS packages
+  ./build.sh -c                 # Clean all symlinks and build artifacts
+  ./build.sh --clean package1   # Clean specific package and build artifacts
+  ./build.sh -m                 # Build with CMake for hardware deployment
+  ./build.sh -mj                # Build with CMake and MuJoCo simulator support
 ```
+
+> [!TIP]
+> 如果 catkin build 报错: `Unable to find either executable 'empy' or Python module 'em'`, 在`catkin build` 之前执行 `catkin config -DPYTHON_EXECUTABLE=/usr/bin/python3`
 
 ## 运行
 
@@ -86,17 +120,77 @@ Options:
 
 ### 仿真
 
+#### Gazebo
+
+打开一个终端，启动gazebo仿真环境
+
+```bash
+# ROS1
+source devel/setup.bash
+roslaunch rl_sar gazebo.launch rname:=<ROBOT>
+
+# ROS2
+source install/setup.bash
+ros2 launch rl_sar gazebo.launch.py rname:=<ROBOT>
+```
+
+打开一个新终端，启动控制程序
+
+```bash
+# ROS1
+source devel/setup.bash
+rosrun rl_sar rl_sim
+
+# ROS2
+source install/setup.bash
+ros2 run rl_sar rl_sim
+```
+
+> [!TIP]
+> **重要提示：** 启动Gazebo后，必须在另一个终端中启动`rl_sim`来控制机器人。如果不启动`rl_sim`，机器人将不会被控制，可能会摔倒。
+>
+> Ubuntu22.04中若启动Gazebo后看不到机器人，则是机器人初始化到了视野范围外，启动rl_sim后会自动重置机器人位置。若机器人在站立过程中翻倒，请使用键盘`R`或手柄`RB+Y`重置机器人环境。
+
+如果第一次启动Gazebo无法打开则需要下载模型包
+
+```bash
+git clone https://github.com/osrf/gazebo_models.git ~/.gazebo/models
+```
+
 #### Mujoco
 
 ```bash
 ./cmake_build/bin/rl_sim_mujoco <ROBOT> <SCENE>
 ```
 
-### Web 调试台 (内置,无需额外服务)
+### 使用手机网页控制 (实验性)
 
-主控程序 `rl_real_JXG` 内置 WebSocket 服务器,与 Web 调试台静态文件同端口托管,无需 rosbridge / web_video_server 等任何额外服务。
+安装依赖
 
-启动主程序后,浏览器访问 `http://<机器人IP>:8088` 即可打开调试台;端口与静态目录可通过 `--web-port` / `--web-root` 修改。调试台提供 3D 模型跟随、电机/IMU/里程计遥测、速度遥控、行为命令、通知与作业交底播报、通道调试等功能。
+```bash
+sudo apt install ros-${ROS_DISTRO}-rosbridge-suite
+sudo apt install ros-${ROS_DISTRO}-web-video-server
+
+# 如果您使用的ROS2版本不是Humble、Jazz或Rolling，需要从源码编译 `web_video_server`
+cd <your_ros2_workspace>/src
+git clone https://github.com/RobotWebTools/web_video_server.git
+cd <your_ros2_workspace>
+colcon build --packages-select web_video_server
+```
+
+在机器人上运行 rosbridge 和 web_video_server
+
+```bash
+# ROS1
+roslaunch rosbridge_server rosbridge_websocket.launch
+rosrun web_video_server web_video_server
+
+# ROS2
+ros2 launch rosbridge_server rosbridge_websocket_launch.xml
+ros2 run web_video_server web_video_server
+```
+
+访问 [http://robot.robotsfan.com/](http://robot.robotsfan.com/)， 填写IP地址和端口，检查右上角的设置界面，然后连接机器人。进入控制页面后，将屏幕水平放置，点击左上角的全屏按钮，即可使用手机浏览器控制机器人！
 
 ### 使用手柄或键盘控制
 
@@ -105,7 +199,7 @@ Options:
 |**基础**|||
 |A|Num0|让机器人从程序开始运行时的姿态以位控插值运动到`base.yaml`中定义的`default_dof_pos`|
 |B|Num9|让机器人从当前位置以位控插值运动到程序开始运行时的姿态|
-|X|N|切换导航模式 (导航模式屏蔽手柄速度命令，接收 Web 下发的`cmd_vel`通道)|
+|X|N|切换导航模式 (导航模式屏蔽速度命令，接收`cmd_vel`话题)|
 |Y|N/A|N/A|
 |**仿真**|||
 |RB+Y|R|重置Gazebo环境 (让摔倒的机器人站起来)|
@@ -136,12 +230,19 @@ Options:
 
 JXG 通过自定义 JXG SDK（USB2CAN）连接电机和 IMU。
 
-启动控制程序（内置 Web 调试台 `http://<机器人IP>:8088` 随主程序一同启动）。如果控制 JXGw（轮腿模式），使用 `wheel` 参数。
+新建终端，启动控制程序。如果控制 JXGw（轮腿模式），需要在命令后加 `wheel`，否则留空。
 
 ```bash
-# 手动启动(推荐用脚本: 自动等待 CAN 接口 UP 后拉起主程序)
-scripts/start.sh            # wheel 模式
-scripts/start.sh --help     # 查看全部参数(--web-port / --web-root 等)
+# CMake (实机部署推荐)
+./cmake_build/bin/rl_real_JXG [wheel]
+
+# ROS1
+source devel/setup.bash
+rosrun rl_sar rl_real_JXG [wheel]
+
+# ROS2
+source install/setup.bash
+ros2 run rl_sar rl_real_JXG [wheel]
 ```
 
 **可用策略配置：**
@@ -156,32 +257,65 @@ scripts/start.sh --help     # 查看全部参数(--web-port / --web-root 等)
 
 #### 开机自启动
 
-仓库根目录已提供现成的服务文件 `rl-real-jxg.service`（裸机直跑，含 CAN 等待与实时性调度参数），直接安装即可：
+如需设置开机自启动，可以参考以下流程：
+
+创建一个服务文件
 
 ```bash
-sudo cp rl-real-jxg.service /etc/systemd/system/
+sudo touch /etc/systemd/system/rl_sar.service
+```
+
+写入以下内容，假设rl_sar工程在 `~/rl_sar` 目录下
+
+```
+[Unit]
+Description=RL SAR Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/rl_sar
+ExecStart=/root/rl_sar/cmake_build/bin/rl_real_JXG
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+重新加载 systemd 配置：
+
+```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now rl-real-jxg.service
+```
+
+设置开机自动启动：
+
+```bash
+sudo systemctl enable rl_sar.service
 ```
 
 禁用开机自动启动：
 
 ```bash
-sudo systemctl disable rl-real-jxg.service
+sudo systemctl disable rl_sar.service
 ```
 
 启动/停止/重启服务：
 
 ```bash
-sudo systemctl start rl-real-jxg.service
-sudo systemctl stop rl-real-jxg.service
-sudo systemctl restart rl-real-jxg.service
+sudo systemctl start rl_sar.service
+sudo systemctl stop rl_sar.service
+sudo systemctl restart rl_sar.service
 ```
 
 查看服务日志：
 
 ```bash
-sudo journalctl -u rl-real-jxg.service -f
+sudo journalctl -u rl_sar.service -f
 ```
 
 ## 添加你的机器人
@@ -245,16 +379,3 @@ rl_sar/src/rl_sar/src/rl_real_<ROBOT>.cpp  # 可以按需自定义forward()函�
 - [ccrpRepo/RoboMimic_Deploy](https://github.com/ccrpRepo/RoboMimic_Deploy)
 - [Deeprobotics/Lite3_Motion_SDK](https://github.com/DeepRoboticsLab/Lite3_MotionSDK)
 - [chengyangkj/ROS_Flutter_Gui_App](https://github.com/chengyangkj/ROS_Flutter_Gui_App)
-
----
-
-## 依赖：本仓库**未包含**的内容
-
-为控制仓库体积，以下内容没有纳入版本管理。克隆后如需完整复现，按下表补齐：
-
-| 内容 | 为何排除 | 如何补齐 |
-|---|---|---|
-| `cmake_build/` | 编译产物，可重建 | 在仓库根目录执行 `./build.sh` |
-| `logs/` | 机器人运行日志 | —（运行时自动生成） |
-| `library/inference_runtime/`<br>`src/rl_sar/library/inference_runtime/` | 预编译推理运行时，体积大 | `bash scripts/download_inference_runtime.sh` |
-| `src/rl_sar/library/thirdparty/robot_sdk/unitree/` | 上游公开仓库 [unitreerobotics/unitree_sdk2](https://github.com/unitreerobotics/unitree_sdk2)，本机型（JXG 轮足狗，USB-CAN）用不到 | `cd src/rl_sar/library/thirdparty/robot_sdk && git clone https://github.com/unitreerobotics/unitree_sdk2.git unitree/unitree_sdk2` |

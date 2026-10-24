@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(rl_sar VERSION 4.0.0 LANGUAGES CXX)
+project(rl_sar VERSION 4.0.0 LANGUAGES C CXX)
 
 # Set C++ standard globally
 set(CMAKE_CXX_STANDARD 17)
@@ -8,14 +8,38 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # System environment detection
 set(SYSTEM_TYPE ${CMAKE_SYSTEM_NAME})
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(USE_CMAKE OFF CACHE BOOL "Use Cmake build system")
+if(USE_CMAKE)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+endif()
 
-# Simulator options
+if(NOT USE_CMAKE)
+    if($ENV{ROS_DISTRO} MATCHES "noetic")
+        add_compile_definitions(USE_ROS1)
+    elseif($ENV{ROS_DISTRO} MATCHES "foxy|humble|jazzy")
+        add_compile_definitions(USE_ROS2)
+    endif()
+else()
+    message(WARNING "ROS_DISTRO not set, assuming non-ROS mode")
+    add_compile_definitions(USE_CMAKE)
+endif()
+
+# Simulator options. Gazebo classic is optional because ROS2 Jazzy/Ubuntu 24.04
+# no longer provides it in the same way as the older ROS environments.
 set(USE_MUJOCO OFF CACHE BOOL "Build with MuJoCo simulator support")
+set(BUILD_ROS_GAZEBO_SIM OFF CACHE BOOL "Build ROS Gazebo simulation targets")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# ccache: 装了则启用编译缓存(重复全量重编提速),未装自动跳过
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    message(STATUS "ccache enabled: ${CCACHE_PROGRAM}")
+endif()
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
@@ -31,6 +55,60 @@ get_filename_component(PROJECT_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSO
 add_definitions(-DCMAKE_CURRENT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_definitions(-DPOLICY_DIR="${PROJECT_ROOT_DIR}/policy")
 add_definitions(-DBOOST_BIND_GLOBAL_PLACEHOLDERS)
+
+# ---- 版本与构建时间(每次 cmake 配置时生成,编译进二进制) ----
+string(TIMESTAMP BUILD_TIMESTAMP "%Y-%m-%d %H:%M:%S" UTC)
+# 构建号: 环境变量 BUILD_NUMBER 覆盖,否则用日期+小时分钟(如 20261018-1030)
+if(DEFINED ENV{BUILD_NUMBER})
+    set(BUILD_NUMBER "$ENV{BUILD_NUMBER}")
+else()
+    string(TIMESTAMP BUILD_NUMBER "%Y%m%d-%H%M" UTC)
+endif()
+message(STATUS "Build version: ${PROJECT_VERSION} build ${BUILD_NUMBER} @ ${BUILD_TIMESTAMP}")
+
+if(NOT USE_CMAKE)
+    if($ENV{ROS_DISTRO} MATCHES "noetic")
+        find_package(catkin REQUIRED COMPONENTS
+            controller_manager
+            genmsg
+            joint_state_controller
+            robot_state_publisher
+            roscpp
+            gazebo_ros
+            std_msgs
+            tf
+            geometry_msgs
+            robot_msgs
+            robot_joint_controller
+            rospy
+        )
+        catkin_package(
+            CATKIN_DEPENDS
+            robot_joint_controller
+            rospy
+        )
+    elseif($ENV{ROS_DISTRO} MATCHES "foxy|humble|jazzy")
+        find_package(ament_cmake REQUIRED)
+        find_package(rclcpp REQUIRED)
+        find_package(std_msgs REQUIRED)
+        find_package(robot_msgs REQUIRED)
+        find_package(robot_joint_controller REQUIRED)
+        find_package(geometry_msgs REQUIRED)
+        if(BUILD_ROS_GAZEBO_SIM)
+            find_package(joint_state_broadcaster REQUIRED)
+            find_package(robot_state_publisher REQUIRED)
+            find_package(gazebo_ros REQUIRED)
+            find_package(rclpy REQUIRED)
+            find_package(gazebo_msgs REQUIRED)
+            find_package(std_srvs REQUIRED)
+            add_compile_options(${GAZEBO_CXX_FLAGS})
+            find_package(gazebo REQUIRED)
+        else()
+            message(STATUS "ROS Gazebo simulation disabled; building real-control targets only")
+        endif()
+        ament_package()
+    endif()
+endif()
 
 # Inference Runtime
 
@@ -203,15 +281,7 @@ elseif(SYSTEM_TYPE STREQUAL "Darwin")
     endif()
 endif()
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
-    message(STATUS "Current system architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-    set(ARCH_DIR "aarch64")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-message(STATUS "Current system architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-    set(ARCH_DIR "x86_64")
-else()
-    message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-endif()
+# v5: 已移除 Unitree SDK(ARCH_DIR/UNITREE_LIB/unitree_sdk2 均未被任何目标引用)
 
 # JXG SDK
 set(JXG_SDK_SRC
@@ -223,6 +293,33 @@ set(JXG_SDK_SRC
 
 find_package(SDL2 REQUIRED)
 include_directories(${SDL2_INCLUDE_DIRS})
+
+# ===== v4: 通信层开关(ROS 话题层 / Web 调试台层可独立开关, 也可共存) =====
+# ENABLE_WEB_BRIDGE: 内置 HTTP 静态页 + WebSocket(:8088)。
+#   默认值跟随 USE_CMAKE —— 裸机构建 ON(与 v3 一致), colcon/ament 纯 ROS
+#   构建 OFF(与 v3 一致)。共存: cmake -DUSE_CMAKE=ON -DENABLE_ROS2_REAL_CONTROL=ON
+#   (source ROS setup 后)两层同时编入, 源码层宏为 JXG_ENABLE_WEB_BRIDGE。
+option(ENABLE_WEB_BRIDGE "Enable built-in Web console (HTTP static + WebSocket :8088)" ${USE_CMAKE})
+if(ENABLE_WEB_BRIDGE)
+    add_compile_definitions(JXG_ENABLE_WEB_BRIDGE)
+    message(STATUS "Web bridge enabled for rl_real_JXG (ENABLE_WEB_BRIDGE=ON)")
+endif()
+
+option(ENABLE_ROS2_REAL_CONTROL "Enable ROS2 control and telemetry topics for rl_real_JXG" ON)
+if(ENABLE_ROS2_REAL_CONTROL)
+    # v4: lyrical 已移除 ament_target_dependencies 宏(ament_cmake 不再聚合它),
+    # 直接 find_package 后用 imported targets 链接(foxy+ 均支持,colcon/裸机两种构建通用)。
+    find_package(rclcpp QUIET)
+    find_package(std_msgs QUIET)
+    find_package(geometry_msgs QUIET)
+    if(rclcpp_FOUND AND std_msgs_FOUND AND geometry_msgs_FOUND)
+        add_compile_definitions(USE_ROS2_REAL_CONTROL)
+        message(STATUS "ROS2 real control enabled for rl_real_JXG")
+    else()
+        set(ENABLE_ROS2_REAL_CONTROL OFF)
+        message(WARNING "ROS2 real control disabled: rclcpp/std_msgs/geometry_msgs not found")
+    endif()
+endif()
 
 find_package(Eigen3 REQUIRED)
 
@@ -241,19 +338,19 @@ set_target_properties(JXG_sdk PROPERTIES
 )
 set(JXG_REAL_LIBS JXG_sdk Threads::Threads ${SDL2_LIBRARIES})
 
-# Retroid Gamepad
-if(SYSTEM_TYPE STREQUAL "Linux")
-set(GAMEPAD_SRC
-    ${CMAKE_CURRENT_SOURCE_DIR}/library/thirdparty/robot_sdk/deeprobotics/gamepad/src/gamepad.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/library/thirdparty/robot_sdk/deeprobotics/gamepad/src/retroid_gamepad.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/library/thirdparty/robot_sdk/deeprobotics/gamepad/src/udp_receiver.cpp
-)
+# v5: 已移除 Retroid Gamepad 死代码(GAMEPAD_SRC 指向不存在的 deeprobotics 路径且从未被引用)
+
+if(NOT USE_CMAKE)
+    if($ENV{ROS_DISTRO} MATCHES "noetic")
+        include_directories(${catkin_INCLUDE_DIRS})
+    endif()
 endif()
 
 include_directories(
     include
     library/core/matplotlibcpp
     library/core/observation_buffer
+    library/core/web_bridge
     library/core/rl_sdk
     library/core/loop
     library/core/fsm
@@ -261,7 +358,6 @@ include_directories(
     library/core/motion_loader
     library/core/inference_runtime
     library/core/logger
-    library/core/web_bridge
     fsm_robot
 )
 
@@ -278,6 +374,11 @@ endif()
 if(USE_ONNX)
     target_link_libraries(inference_runtime PUBLIC ${ONNX_RUNTIME_LIB})
     target_compile_definitions(inference_runtime PRIVATE USE_ONNX)
+endif()
+if(NOT USE_CMAKE)
+    if($ENV{ROS_DISTRO} MATCHES "foxy|humble|jazzy")
+        install(TARGETS inference_runtime DESTINATION lib/${PROJECT_NAME})
+    endif()
 endif()
 
 # library for motion loader
@@ -298,33 +399,138 @@ if(Python3_NumPy_FOUND)
 else()
     target_compile_definitions(rl_sdk PUBLIC WITHOUT_NUMPY)
 endif()
+if(NOT USE_CMAKE)
+    if($ENV{ROS_DISTRO} MATCHES "foxy|humble|jazzy")
+        install(TARGETS rl_sdk DESTINATION lib/${PROJECT_NAME})
+    endif()
+endif()
 
 # library for observation buffer
 add_library(observation_buffer library/core/observation_buffer/observation_buffer.cpp)
+if(NOT USE_CMAKE)
+    if($ENV{ROS_DISTRO} MATCHES "foxy|humble|jazzy")
+        install(TARGETS observation_buffer DESTINATION lib/${PROJECT_NAME})
+    endif()
+endif()
 
 # library for web bridge (内置 WebSocket + 静态文件服务器，替代 rosbridge/ROS2)
 add_library(web_bridge library/core/web_bridge/web_bridge.cpp)
+# 版本宏(/api/version 接口用,与可执行 target 同源)
+target_compile_definitions(web_bridge PRIVATE
+    APP_VERSION="${PROJECT_VERSION}"
+    BUILD_NUMBER="${BUILD_NUMBER}"
+    BUILD_TIMESTAMP="${BUILD_TIMESTAMP}"
+)
 target_link_libraries(web_bridge PUBLIC Threads::Threads)
 set_target_properties(web_bridge PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
 )
 
+# executable for rl sim
+if(NOT USE_CMAKE AND BUILD_ROS_GAZEBO_SIM)
+    add_executable(rl_sim src/rl_sim.cpp)
+    target_link_libraries(rl_sim
+        rl_sdk
+        observation_buffer
+        ${YAML_CPP_LIBRARIES}
+        Threads::Threads
+    )
+    if($ENV{ROS_DISTRO} MATCHES "noetic")
+        target_link_libraries(rl_sim ${catkin_LIBRARIES})
+    elseif($ENV{ROS_DISTRO} MATCHES "foxy|humble|jazzy")
+        ament_target_dependencies(rl_sim
+            joint_state_broadcaster
+            robot_state_publisher
+            rclcpp
+            gazebo_ros
+            std_msgs
+            robot_msgs
+            robot_joint_controller
+            rclpy
+            gazebo_msgs
+            std_srvs
+            geometry_msgs
+        )
+        install(TARGETS rl_sim DESTINATION lib/${PROJECT_NAME})
+    endif()
+endif()
+
 # executable for rl real JXG
 if(SYSTEM_TYPE STREQUAL "Linux")
-    find_library(ALSA_LIB asound REQUIRED)
-    add_executable(rl_real_JXG src/rl_real_JXG.cpp src/briefing_audio_player.cpp)
+    add_executable(rl_real_JXG src/rl_real_JXG.cpp src/rl_real_hr_log.cpp src/rl_real_notify.cpp src/rl_real_safe_getup.cpp src/rl_real_posture.cpp src/rl_real_command.cpp src/rl_real_telemetry.cpp src/rl_real_safety.cpp src/rl_real_diff_drive.cpp)
     target_link_libraries(rl_real_JXG
         ${JXG_REAL_LIBS}
         rl_sdk
         observation_buffer
         web_bridge
         ${YAML_CPP_LIBRARIES}
-        ${ALSA_LIB}
+        util
     )
     target_compile_definitions(rl_real_JXG PRIVATE
         WEB_ROOT="${PROJECT_ROOT_DIR}/web"
+        APP_VERSION="${PROJECT_VERSION}"
+        BUILD_NUMBER="${BUILD_NUMBER}"
+        BUILD_TIMESTAMP="${BUILD_TIMESTAMP}"
     )
+    # 导出动态符号,使 crash_dump.hpp 的 backtrace_symbols 能打印函数名
+    target_link_options(rl_real_JXG PRIVATE "-rdynamic")
+    if(ENABLE_ROS2_REAL_CONTROL)
+        # v4: imported targets 链接(替代 lyrical 已移除的 ament_target_dependencies)
+        # 注: 上方本 target 的 target_link_libraries 用的是无关键字签名,此处必须保持一致
+        target_link_libraries(rl_real_JXG
+            rclcpp::rclcpp
+            ${std_msgs_TARGETS}
+            ${geometry_msgs_TARGETS}
+        )
+    endif()
+endif()
+if(NOT USE_CMAKE AND "$ENV{ROS_DISTRO}" MATCHES "foxy|humble|jazzy|lyrical")
+    install(TARGETS rl_real_JXG DESTINATION lib/${PROJECT_NAME})
+endif()
+
+# standalone web console: ROS2 话题 <-> WebSocket/HTTP 桥, 独立于 rl_real_JXG 进程,
+# 重启控制程序时浏览器连接不中断(部署为 jxg-web.service)。
+if(ENABLE_WEB_BRIDGE AND ENABLE_ROS2_REAL_CONTROL AND SYSTEM_TYPE STREQUAL "Linux")
+    add_executable(web_server src/web_server_main.cpp src/bms_ble.cpp)
+    target_link_libraries(web_server
+        web_bridge
+        rclcpp::rclcpp
+        ${std_msgs_TARGETS}
+        ${geometry_msgs_TARGETS}
+        util
+        systemd
+    )
+    target_compile_definitions(web_server PRIVATE
+        WEB_ROOT="${PROJECT_ROOT_DIR}/web"
+        APP_VERSION="${PROJECT_VERSION}"
+        BUILD_NUMBER="${BUILD_NUMBER}"
+        BUILD_TIMESTAMP="${BUILD_TIMESTAMP}"
+    )
+endif()
+
+# executable for actuator net
+if(NOT USE_CMAKE)
+    if($ENV{ROS_DISTRO} MATCHES "noetic")
+        catkin_install_python(PROGRAMS
+            scripts/actuator_net.py
+            DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+        )
+    elseif($ENV{ROS_DISTRO} MATCHES "foxy|humble|jazzy")
+        install(PROGRAMS
+            scripts/actuator_net.py
+            DESTINATION lib/${PROJECT_NAME}
+        )
+    endif()
+endif()
+
+if(NOT USE_CMAKE)
+    if($ENV{ROS_DISTRO} MATCHES "foxy|humble|jazzy")
+        install(
+            DIRECTORY launch worlds ${PROJECT_ROOT_DIR}/policy
+            DESTINATION share/${PROJECT_NAME}/${dir}
+        )
+    endif()
 endif()
 
 # ========================
@@ -449,6 +655,9 @@ endif()
 # target_link_libraries(test_observation_buffer
 #     observation_buffer
 # )
+# install(TARGETS test_observation_buffer DESTINATION lib/${PROJECT_NAME})
+# add_executable(test_vector_math test/test_vector_math.cpp)
+# install(TARGETS test_vector_math DESTINATION lib/${PROJECT_NAME})
 
 # add_executable(test_inference_stability test/test_inference_stability.cpp)
 # target_link_libraries(test_inference_stability
@@ -456,6 +665,7 @@ endif()
 #     ${TORCH_LIBRARIES}
 #     ${ONNX_RUNTIME_LIB}
 # )
+# install(TARGETS test_inference_stability DESTINATION lib/${PROJECT_NAME})
 
 message(STATUS "========================================")
 message(STATUS "       RL_SAR Build Configuration       ")
@@ -466,6 +676,7 @@ message(STATUS "Architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "USE_CMAKE: ${USE_CMAKE}")
 message(STATUS "----------------------------------------")
 message(STATUS "Backend Configuration:")
 message(STATUS "USE_TORCH: ${USE_TORCH}")
@@ -486,6 +697,8 @@ endif()
 if(USE_ONNX)
     if(ONNX_RUNTIME_VERSION)
         message(STATUS "ONNX Runtime version: ${ONNX_RUNTIME_VERSION}")
+    elseif(onnxruntime_VERSION)
+        message(STATUS "ONNX Runtime version: ${onnxruntime_VERSION}")
     else()
         message(STATUS "ONNX Runtime: Available")
     endif()

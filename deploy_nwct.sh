@@ -3,7 +3,8 @@
 # 用法: sudo bash /home/kickpi/rl_sar-w2_recovered/deploy_nwct.sh
 set -eo pipefail
 
-KEY="ed034817e23f42589900bfd24e1754f4"
+: "${NWCT_KEY:?Set NWCT_KEY in the environment before running this script}"
+KEY="$NWCT_KEY"
 SRC_BIN="/home/kickpi/.trae-cn-server/data/User/workspaceStorage/e9ae7be1054dfa001179a6a85107a67d/external-files/6aa6591f916aadd6356bd9bc/2-mtzks83s-wtro/main_linux_arm_V.20250626204827"
 APP_DIR="/opt/nwct"
 BIN_NAME="main_linux_arm_V.20250626204827"

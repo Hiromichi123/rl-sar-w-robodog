@@ -29,7 +29,7 @@ import {
 } from './state.js?v=1';
 import { scene, status, jointCountElement } from './scene.js?v=2';
 import { setJointPose, renderControlPanel } from './joints.js?v=1';
-import { initializeCartesianControl, enforceGroundContact, setGroundSnapMode } from './cartesian.js?v=1018';
+import { initializeCartesianControl, enforceGroundContact, setGroundSnapMode } from './cartesian.js?v=1025';
 import { initializeJointAnnotations, initializeStaticMarkers } from './annotations.js?v=949';
 
 const objLoader = new OBJLoader();

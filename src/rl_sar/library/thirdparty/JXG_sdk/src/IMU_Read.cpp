@@ -131,23 +131,14 @@ static constexpr float DEG2RAD = (float)(M_PI / 180.0);
 void UpdateFusedYaw(float gx_raw, float gy_raw, float gz_raw);
 
 void open_imu(void) {
-    // 重试打开:DM-IMU(cdc_acm) 枚举偏慢,上电后可能晚于主程序就绪。
-    // 全部重试失败后不再 exit()(旧行为会拖死整个主程序导致 Web 调试台不可用),
-    // 而是 优雅降级:fd_serial 保持 <=0,read_imu 已有保护,程序继续运行(无 IMU 数据)。
-    constexpr int IMU_OPEN_RETRIES = 10;   // 10 次 × 1s
-    for (int i = 0; i < IMU_OPEN_RETRIES; ++i) {
-        fd_serial = serialOpen(DM_IMU_PORT, DM_IMU_BAUD);
-        if (fd_serial > 0) break;
-        printf("[DM-IMU] USB 串口 %s 打开失败(第 %d/%d 次),1s 后重试... (ls /dev/ttyACM*)\n",
-               DM_IMU_PORT, i + 1, IMU_OPEN_RETRIES);
-        sleep(1);
-    }
+    fd_serial = serialOpen(DM_IMU_PORT, DM_IMU_BAUD);
     if (fd_serial > 0) {
         printf("[DM-IMU] USB 串口 %s 开启成功\n", DM_IMU_PORT);
         // 机器人此时应处于静止状态，采样陀螺零偏（失败会自动跳过）
         calibrate_gyro_bias(2000);
     } else {
-        printf("[DM-IMU] USB 串口 %s 持续打开失败,降级运行(无 IMU 数据,程序继续)\n", DM_IMU_PORT);
+        printf("[DM-IMU] USB 串口 %s 开启失败！请检查设备是否插入 (ls /dev/ttyACM*)\n", DM_IMU_PORT);
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -168,15 +159,28 @@ void read_imu(void) {
     int avail = serialDataAvail(fd_serial);
     if (avail <= 0) return;
 
-    // 读入缓冲区
     int to_read = std::min(avail, (int)(sizeof(rx_buf) - rx_buf_len));
     if (to_read <= 0) {
         rx_buf_len = 0;
         return;
     }
-    for (int i = 0; i < to_read; i++) {
-        rx_buf[rx_buf_len++] = serialGetchar(fd_serial);
+
+    // 读入缓冲区：批量 read 替代逐字节 serialGetchar。
+    // serialGetchar 内部 while(read!=1) 在 FIONREAD 与实际 FIFO 有竞态时会阻塞
+    // 最多 VTIME(100ms)，直接拖垮 1kHz 的 loop_imu。批量 read 一次取走所有可用字节，
+    // VMIN=0 保证无数据时立即返回(部分读也合法,剩余字节下轮再取)。
+    int n = read(fd_serial, rx_buf + rx_buf_len, to_read);
+    if (n > 0) {
+        rx_buf_len += n;
+    } else if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // 非阻塞无数据,正常
+        } else {
+            // 其他错误:清空缓冲避免脏数据累积
+            rx_buf_len = 0;
+        }
     }
+    // n == 0: 无数据可读,保持现有缓冲
 
     // 最小帧长（3-float = 19 字节），不足则等下一轮
     const int MIN_FRAME = DM_FRAME_LEN_3F;

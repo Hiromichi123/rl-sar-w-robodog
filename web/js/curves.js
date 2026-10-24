@@ -8,8 +8,8 @@
  */
 import { jointStates, visibleControls, shared } from './state.js?v=1';
 import { labelForJoint } from './joints.js?v=1';
-import { motorTelemetry } from './ros-bridge.js?v=981';
-import { lastMessageAt, messageCount } from './ros-bridge.js?v=981';
+import { motorTelemetry } from './ros-bridge.js?v=2026102001';
+import { lastMessageAt, messageCount } from './ros-bridge.js?v=2026102001';
 import * as THREE from 'three';
 
 /** 最多记录的秒数(环形缓冲容量),比最大 UI 窗口略大 */
@@ -17,6 +17,11 @@ const MAX_SECONDS = 75;
 /** 期望帧率上界,用于估算缓冲长度(实际每帧追加,不按固定步长) */
 const EST_FPS = 60;
 const BUF_LEN = MAX_SECONDS * EST_FPS;
+
+/** 是否在曲线上绘制 Y 轴数值标签(yMax/yMin)。默认关闭,保持画面简洁。 */
+let _showYAxisLabels = false;
+export function setShowYAxisLabels(v) { _showYAxisLabels = !!v; }
+export function getShowYAxisLabels() { return _showYAxisLabels; }
 
 /** 按关节名索引的环形缓冲 */
 const buffers = new Map();
@@ -218,11 +223,13 @@ function drawCurve(canvas, spec, windowSec, dpr) {
   ctx.strokeStyle = 'rgba(170,193,225,0.08)';
   ctx.lineWidth = 1;
   ctx.font = '9px ui-monospace, monospace';
-  ctx.fillStyle = 'rgba(170,193,225,0.4)';
-  ctx.textBaseline = 'top';
-  ctx.fillText(yMax.toFixed(precision), 2, 1);
-  ctx.textBaseline = 'bottom';
-  ctx.fillText(yMin.toFixed(precision), 2, h - 1);
+  if (_showYAxisLabels) {
+    ctx.fillStyle = 'rgba(170,193,225,0.4)';
+    ctx.textBaseline = 'top';
+    ctx.fillText(yMax.toFixed(precision), 2, 1);
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(yMin.toFixed(precision), 2, h - 1);
+  }
   for (let i = 0; i <= 3; i++) {
     const y = (h / 3) * i;
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
@@ -588,11 +595,13 @@ function drawImuCurve(canvas, spec, windowSec, dpr) {
   ctx.strokeStyle = 'rgba(170,193,225,0.08)';
   ctx.lineWidth = 1;
   ctx.font = '9px ui-monospace, monospace';
-  ctx.fillStyle = 'rgba(170,193,225,0.4)';
-  ctx.textBaseline = 'top';
-  ctx.fillText(yMax.toFixed(spec.precision), 2, 1);
-  ctx.textBaseline = 'bottom';
-  ctx.fillText(yMin.toFixed(spec.precision), 2, h - 1);
+  if (_showYAxisLabels) {
+    ctx.fillStyle = 'rgba(170,193,225,0.4)';
+    ctx.textBaseline = 'top';
+    ctx.fillText(yMax.toFixed(spec.precision), 2, 1);
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(yMin.toFixed(spec.precision), 2, h - 1);
+  }
   for (let i = 0; i <= 3; i++) {
     const y = (h / 3) * i;
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
@@ -794,10 +803,13 @@ export function recordJoystickSample(nowMs) {
   if (!joy || !joy.msgCount) return;  // 从未操作过摇杆,跳过
   if (paused) return;
   // 空闲超时兜底(仅当没有摇杆在拖拽中且不在衰减中才生效)
+  // 定速巡航锁定轴例外:锁定语义=无限保持当前值,此处清零后,下一次
+  // pushJoystickCommand(如操作另一杆)就会把 0 发给机器人,表现为
+  // "开着速度锁定,一操作别的按钮锁定值就被清零"。锁定轴必须原值保留。
   const dragging = !!document.querySelector('.joystick.dragging');
   if (!dragging && joy.decayStartAt === 0 && nowMs - (joy.lastUpdateAt || 0) > JOY_IDLE_TIMEOUT_MS) {
-    joy.nx = 0; joy.ny = 0;
-    joy.vx = 0; joy.vy = 0; joy.omega = 0;
+    if (!joy.cruiseLockedLeft)  { joy.nx = 0; joy.ny = 0; joy.vx = 0; joy.vy = 0; }
+    if (!joy.cruiseLockedRight) { joy.omega = 0; }
   }
   // 持续记录:有值画值,松开(全 0)画 0 平线——不再跳过零值
   writeJoySamples(nowMs, joy);

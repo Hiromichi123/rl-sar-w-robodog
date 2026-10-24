@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  v4 FastDDS 传输配置: 仅用 UDPv4, 关闭共享内存(SHM)传输。
+
+  原因: rl_real_JXG 服务以 root 运行, 而本机调试时 ros2 CLI 通常以普通用户
+  (jinjiao)运行。FastDDS 默认的 SHM 传输在 root 创建的 /dev/shm 段上跨用户
+  不可用 —— 现象是 `ros2 topic list` 能发现话题(UDP 发现报文正常), 但
+  `ros2 topic echo` 收不到任何数据(SHM 数据通道静默失败)。
+
+  节点侧强制 UDP-only 后, 对端发现到的数据定位点只有 UDP, 任意用户的
+  ros2 CLI / 上位机(本机或网络)都无需额外配置即可收发。
+  话题数据量(motor_state passive 8Hz / 运动态 200Hz 小报文)在 lo/百兆网
+  上开销可忽略(passive 实测双客户端总 CPU +约 5%/单核)。
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_only</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="udp_only_participant" is_default_profile="true">
+    <rtps>
+      <userTransports>
+        <transport_id>udp_only</transport_id>
+      </userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

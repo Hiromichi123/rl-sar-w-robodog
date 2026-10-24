@@ -12,22 +12,12 @@ import * as THREE from 'three';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { bodyObjects, jointStates, visibleControls, shared, currentModelId } from './state.js?v=1';
 import {
-  motorTelemetry, JOINT_MAPPING, getRosUrl,
-  addMessageListener, addImuListener,
-  MOTOR_STATE_TOPIC, IMU_STATE_TOPIC,
-} from './ros-bridge.js?v=981';
+  motorTelemetry, JOINT_MAPPING,
+  addMessageListener,
+} from './ros-bridge.js?v=2026102001';
 import { labelForJoint } from './joints.js?v=1';
-import { isReplaying } from './recorder-replay.js?v=967';
-import {
-  startRecording, stopRecording, recordFrame,
-  resumeRecording, syncRecordingMeta, renameRecording,
-} from './recorder-storage.js?v=967';
 
 const LS_KEY = 'web_sim_alarm_rules_v1';
-/** 报警记录元数据(同 key 合并一条;帧数据在 recordings store,复用录制复现管道) */
-const LS_RECORDS_KEY = 'web_sim_alarm_records_v1';
-/** 单条报警记录的最大 motor 帧数(超过则封盘,下次报警另起一条) */
-const ALARM_CAPTURE_MAX_FRAMES = 120000;
 
 /** 电机可报警字段(与 /rl_real/motor_state 9/10 字段块对应;temp 仅 10-float 新协议) */
 const MOTOR_FIELD_DEFS = [
@@ -76,79 +66,11 @@ const alarmState = {
 const _evalNextMap = new Map();
 const _evalBreachingMap = new Map();
 
-// ── 报警周期(帧)去抖 + 报警记录捕获 ──────────────────────
-/** motor_state 实收帧计数(复现注入的帧不计入) */
+// ── 报警周期(帧)去抖 ─────────────────────────────────────
+/** motor_state 实收帧计数 */
 let motorFrameCounter = 0;
 /** key -> { startFrame } 越限开始时的帧计数(未达周期阈值前的去抖状态) */
 const pendingBreaches = new Map();
-/** key -> { recordingId, label, frames, occurrences, lastEndedAt, closing } 已合并的报警记录捕获会话 */
-const captures = new Map();
-
-/** 读取报警记录元数据 localStorage */
-function loadRecordMeta() {
-  try { return JSON.parse(localStorage.getItem(LS_RECORDS_KEY) || '{}'); }
-  catch (_) { return {}; }
-}
-function saveRecordMeta(meta) {
-  try { localStorage.setItem(LS_RECORDS_KEY, JSON.stringify(meta)); } catch (_) { /* 忽略 */ }
-}
-
-/** 报警激活:开启(或复用)该 key 的合并记录会话(跨页面刷新也合并到同一条) */
-async function ensureCapture(key, label) {
-  if (captures.has(key)) return captures.get(key);
-  const meta = loadRecordMeta();
-  const prev = meta[key];
-  let recordingId = null;
-  // 已有合并记录且未封盘:续录到同一条(相同报警合并一条)
-  if (prev?.recordingId && !prev.closed) {
-    try { recordingId = await resumeRecording(prev.recordingId); } catch (_) { recordingId = null; }
-  }
-  if (recordingId == null) {
-    const { recordingId: newId } = await startRecording({
-      name: `⚠ ${label}`,
-      modelId: currentModelId,
-      rosUrl: getRosUrl(),
-    });
-    recordingId = newId;
-  }
-  const cap = {
-    recordingId,
-    label,
-    frames: prev?.frames || 0,
-    occurrences: (prev?.occurrences || 0) + 1,
-    lastEndedAt: null,
-    closing: false,
-  };
-  captures.set(key, cap);
-  meta[key] = { recordingId, label, occurrences: cap.occurrences, frames: cap.frames, closed: false, modelId: String(currentModelId) };
-  saveRecordMeta(meta);
-  // 触发瞬间即通知「录制列表」刷新,让新记录立即出现(不等报警结束)
-  try { window.dispatchEvent(new CustomEvent('web-sim:alarm-recordings-changed')); } catch (_) { /* 忽略 */ }
-  return cap;
-}
-
-/** 报警结束:更新合并元数据 + 刷新记录帧数(会话保持打开,下次报警继续合并);帧数超限则封盘。
- *  记录条目统一显示在「录制列表」页(名称含 ⚠ 与合并次数),报警页不再单列。 */
-async function finalizeCapture(key) {
-  const cap = captures.get(key);
-  if (!cap) return;
-  cap.lastEndedAt = Date.now();
-  const closed = cap.frames >= ALARM_CAPTURE_MAX_FRAMES;
-  const meta = loadRecordMeta();
-  meta[key] = { recordingId: cap.recordingId, label: cap.label, occurrences: cap.occurrences, frames: cap.frames, closed, modelId: String(currentModelId) };
-  saveRecordMeta(meta);
-  try { await syncRecordingMeta(cap.recordingId); } catch (_) { /* 忽略 */ }
-  // 名称带上合并次数,如「⚠ xxx ×3」
-  const name = `⚠ ${cap.label}${cap.occurrences > 1 ? ` ×${cap.occurrences}` : ''}`;
-  try { await renameRecording(cap.recordingId, name); } catch (_) { /* 忽略 */ }
-  if (closed && !cap.closing) {
-    cap.closing = true;
-    try { await stopRecording(cap.recordingId); } catch (_) { /* 忽略 */ }
-    captures.delete(key);
-  }
-  // 报警结束(合并次数/帧数更新、封盘)后同样刷新列表
-  try { window.dispatchEvent(new CustomEvent('web-sim:alarm-recordings-changed')); } catch (_) { /* 忽略 */ }
-}
 
 // ── 持久化 ────────────────────────────────────────────────
 function loadConfig() {
@@ -386,17 +308,10 @@ function renderActiveList() {
  *  - 电机:读 motorTelemetry 原始遥测(ALL = 当前模型全部电机,任一越限即报警);
  *  - IMU:读 shared.imu(要求 1s 内有数据);
  *  - 周期去抖:越限需持续超过规则配置的「周期(帧)」(motor_state 实收帧数)
- *    才判定为报警;未达周期即恢复的不显示、不记录;
- *  - 报警激活 → 记入活动报警 + 关节 3D ⚠ 标记(最多 12 个)+ 开始/继续帧捕获
- *    (同一 key 合并一条记录,记录整个报警周期数据);恢复 → 移除标记,封存该周期。
+ *    才判定为报警;未达周期即恢复的不显示;
+ *  - 报警激活 → 记入活动报警 + 关节 3D ⚠ 标记(最多 12 个);恢复 → 移除标记。
  */
 export function evaluateAlarms() {
-  // 复现(回放)期间:注入的是历史合成帧,不参与报警评估;
-  // 并清掉当前报警与标记,避免回放数据冻结遥测导致报警"卡住"不消失。
-  if (isReplaying()) {
-    if (alarmState.active.size || alarmState.markers.size) clearAlarmMarkers();
-    return;
-  }
   evalTick += 1;
   const now = Date.now();
   // 复用 Map 避免 ~5Hz 频率分配 GC 压力
@@ -460,16 +375,6 @@ export function evaluateAlarms() {
   }
   alarmState.active = next;
 
-  // 报警记录捕获:激活的开始(续)捕获;消失的结束本周期
-  for (const [key, a] of next) {
-    if (!captures.has(key)) {
-      ensureCapture(key, a.text).catch((err) => console.warn('[alarm] 开启报警记录失败:', err));
-    }
-  }
-  for (const key of [...captures.keys()]) {
-    if (!next.has(key)) finalizeCapture(key);
-  }
-
   // 3D 标记同步(仅电机类,最多 12 个)
   const marked = new Set();
   let markerCount = 0;
@@ -486,22 +391,10 @@ export function evaluateAlarms() {
   renderActiveList();
 }
 
-/** 帧捕获监听器是否已注册 */
+/** 帧计数监听器是否已注册 */
 let captureListenersBound = false;
 /** IMU 周期去抖用的评估轮次计数 */
 let evalTick = 0;
-
-// ── 报警记录(帧数据存于 IndexedDB recordings store,条目统一显示在「录制列表」页) ──
-/** 删除报警记录时同步清理合并元数据(main.js 删除录制条目时调用) */
-export function purgeAlarmRecordMeta(recordingId) {
-  const rid = Number(recordingId);
-  const meta = loadRecordMeta();
-  let changed = false;
-  for (const key of Object.keys(meta)) {
-    if (Number(meta[key]?.recordingId) === rid) { delete meta[key]; changed = true; }
-  }
-  if (changed) saveRecordMeta(meta);
-}
 
 /** 查询某参数当前是否处于报警状态(数据看板标红用) */
 export function isParamAlarmed(source, field, jointName = null) {
@@ -513,31 +406,12 @@ export function isParamAlarmed(source, field, jointName = null) {
   return false;
 }
 
-/** 注册帧捕获监听器:仅在对应报警处于活动状态期间写入帧(报警结束即停,会话保留以便下次合并) */
+/** 注册帧计数监听器:motor_state 实收帧数用于报警周期去抖 */
 function bindCaptureListeners() {
   if (captureListenersBound) return;
   captureListenersBound = true;
-  addMessageListener((payload) => {
-    if (isReplaying()) return; // 复现注入的帧不参与报警计数/记录
+  addMessageListener(() => {
     motorFrameCounter += 1;
-    if (!captures.size) return;
-    const tsMs = payload?.at || performance.now();
-    const data = Array.isArray(payload?.data) ? payload.data : [];
-    for (const [key, cap] of captures) {
-      if (!alarmState.active.has(key)) continue; // 报警已结束:停止写帧
-      recordFrame(cap.recordingId, { topic: MOTOR_STATE_TOPIC, timestampMs: tsMs, data });
-      cap.frames += 1;
-    }
-  });
-  addImuListener((payload) => {
-    if (isReplaying()) return;
-    if (!captures.size) return;
-    const tsMs = payload?.at || performance.now();
-    const data = Array.isArray(payload?.data) ? payload.data : [];
-    for (const [key, cap] of captures) {
-      if (!alarmState.active.has(key)) continue;
-      recordFrame(cap.recordingId, { topic: IMU_STATE_TOPIC, timestampMs: tsMs, data });
-    }
   });
 }
 

@@ -1,0 +1,60 @@
+/* CodeMirror 搜索/替换对话框深色美化样式(配合 dracula 主题)
+   覆盖搜索框/替换框/Yes·No·All·Stop 确认条,统一盒模型与视觉 */
+
+.CodeMirror-dialog {
+  position: absolute; left: 0; right: 0; z-index: 20;
+  padding: 6px 12px;
+  overflow: hidden;
+  background: linear-gradient(180deg, #3a3e53, #2e3144);
+  color: #f8f8f2;
+  font-size: 12px; line-height: 22px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .35);
+}
+.CodeMirror-dialog-top { top: 0; border-bottom: 1px solid rgba(98, 114, 164, .6); }
+.CodeMirror-dialog-bottom { bottom: 0; border-top: 1px solid rgba(98, 114, 164, .6); }
+
+.CodeMirror-dialog label {
+  display: inline-flex; align-items: center; gap: 4px;
+}
+
+/* 搜索 / 替换输入框(模板带内联 width:10em,以 !important 统一) */
+.CodeMirror-dialog input,
+.CodeMirror-search-field {
+  box-sizing: border-box;
+  height: 24px !important;
+  width: 14em !important;
+  margin: 0 5px; padding: 0 9px;
+  border: 1px solid rgba(98, 114, 164, .8); border-radius: 6px;
+  background: #282a36; color: #f8f8f2;
+  font-family: Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  font-size: 12px; line-height: 22px;
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.CodeMirror-dialog input::placeholder { color: #6b7290; }
+.CodeMirror-dialog input:hover { border-color: #8fa0d8; }
+.CodeMirror-dialog input:focus {
+  border-color: #8be9fd;
+  box-shadow: 0 0 0 2px rgba(139, 233, 253, .18);
+}
+
+/* Yes / No / All / Stop 按钮 */
+.CodeMirror-dialog button {
+  height: 24px; padding: 0 12px; margin: 0 2px;
+  display: inline-flex; align-items: center;
+  font-size: 11px; font-family: inherit;
+  background: #44475a; color: #f8f8f2;
+  border: 1px solid rgba(98, 114, 164, .8); border-radius: 6px;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease;
+}
+.CodeMirror-dialog button:hover { background: #565a78; border-color: #8be9fd; }
+.CodeMirror-dialog button:active { background: #3a3d4e; }
+
+.CodeMirror-search-label { color: #f8f8f2; font-weight: 600; }
+.CodeMirror-search-hint {
+  color: #8be9fd !important; font-size: 11px; opacity: .85; margin-left: 2px;
+}
+
+/* 搜索匹配在滚动条上的标记(annotatescrollbar) */
+.CodeMirror-search-match { background: #ffb86c; opacity: .55; border: none; }

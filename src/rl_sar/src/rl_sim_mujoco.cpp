@@ -346,18 +346,8 @@ void RL_Sim::RunModel()
         this->obs.actions = this->Forward();
         this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
 
-        if (!this->output_dof_pos.empty())
-        {
-            output_dof_pos_queue.push(this->output_dof_pos);
-        }
-        if (!this->output_dof_vel.empty())
-        {
-            output_dof_vel_queue.push(this->output_dof_vel);
-        }
-        if (!this->output_dof_tau.empty())
-        {
-            output_dof_tau_queue.push(this->output_dof_tau);
-        }
+        // 发布最新一帧动作到无锁三缓冲(替代原 3 个 TBB 无界队列 push)。
+        this->PublishAction();
 
         // this->TorqueProtect(this->output_dof_tau);
         // this->AttitudeProtect(this->robot_state.imu.quaternion, 75.0f, 75.0f);
